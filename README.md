@@ -180,6 +180,12 @@ Tested on Windows 11 Pro. Compatible with Windows 10 and Windows 11 Home and Pro
 
 ---
 
+## Safety Notice
+
+This script modifies Windows configuration. Review it before use and test on non-critical systems first. No warranty is provided.
+
+---
+
 ## Licence
 
-MIT. Use freely, modify as needed, no warranty expressed or implied.
+MIT. See [LICENSE](LICENSE).

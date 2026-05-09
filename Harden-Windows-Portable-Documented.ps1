@@ -21,7 +21,7 @@
 #
 # PHASES
 # Phase 0 - Detect:   machine context, rollback check, pre-change backup
-# Phase 1 - Apply:    15 hardening sections with optional interactive mode
+# Phase 1 - Apply:    17 hardening sections with optional interactive mode
 # Phase 2 - Verify:   independent state checks with drift detection
 # Phase 3 - Backup:   post-hardening state export
 # Phase 4 - Tasks:    weekly scheduled task registration
