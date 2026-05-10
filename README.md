@@ -57,6 +57,9 @@ Set-ExecutionPolicy RemoteSigned -Scope CurrentUser
 .\Harden-Windows-Portable-Documented.ps1
 ```
 
+<p align="center">
+  <img src="assets/windows-hardening-run-commands.jpeg" alt="PowerShell commands to unblock and run Windows Hardening Portable" width="900">
+</p>
 
 5. Review the auto-detected machine context displayed at startup
 6. Choose whether to restore from a previous pre-change backup if one exists
