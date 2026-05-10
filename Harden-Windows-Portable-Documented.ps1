@@ -1456,30 +1456,51 @@ Write-Progress-Log "=== Hardening run completed. Verify failures: $($VerifyFaile
 
 
 # =============================================================================
-# CIPHER FREE SPACE WIPE
+# CIPHER FREE SPACE WIPE (OPTIONAL)
 #
 # INFO:
 #   When files are deleted in Windows, the file system marks the space as
 #   available but does not immediately overwrite the data. The deleted file's
-#   content remains on disk until that space is used by a new file. A forensic
-#   tool can recover deleted files by reading unallocated space. cipher /w:C
-#   performs a three-pass wipe writing 0x00, then 0xFF, then random data over
-#   every sector of unallocated space on C:.
+#   content remains on disk until that space is used by a new file. cipher /w:C
+#   attempts to overwrite unallocated space with repeated patterns. However, the
+#   effectiveness of this approach depends heavily on the storage medium.
+#
+#   On HDDs (spinning disks), overwrite-based clearing is appropriate for
+#   magnetic disks when verified. NIST SP 800-88 R2 (Guidelines for Media
+#   Sanitization, https://csrc.nist.gov/pubs/sp/800/88/r2) discusses sanitization
+#   methods for various storage types and their applicability.
+#
+#   On SSDs, cipher /w is not reliable due to:
+#   - Wear-leveling: data is distributed across physical cells unpredictably
+#   - Over-provisioning: firmware reserves cells not accessible to the cipher command
+#   - TRIM operations: remove overwritten data from NAND flash before cipher reaches it
+#   - Firmware abstraction: OS commands may not reach all physical storage locations
+#
+#   For device disposal or transfer, NIST SP 800-88 R2 recommends manufacturer-
+#   supported secure erase or sanitize methods where true sanitization is required.
+#   For day-to-day protection, encryption-backed approaches (BitLocker) provide the
+#   stronger guarantee by rendering data inaccessible via key destruction rather than
+#   relying on overwriting.
 #
 # BENEFITS:
-#   Makes deleted files unrecoverable after hardening. Particularly useful
-#   after clearing the thumbnail cache, prefetch files, activity history,
-#   jump lists, and other forensic artefacts deleted in Phase 1. Without this
-#   step, those deleted files may still be recoverable.
+#   On HDD machines, reduces the risk of forensic recovery of deleted files cleared
+#   during Phase 1 (thumbnail cache, prefetch, activity history, etc). On SSD
+#   machines, this step provides limited additional benefit beyond encryption.
 #
 # CONSIDERATIONS APPLYING:
-#   cipher /w typically takes 10 to 60 minutes depending on free space.
-#   The window must remain open until it completes. It writes heavily to the
-#   SSD but for a one-time post-hardening wipe this is not a meaningful
-#   concern. Enter N to defer and run cipher /w:C manually when ready.
+#   cipher /w typically takes 10 to 60 minutes depending on free space and disk
+#   speed. The window must remain open until it completes. For SSDs without formal
+#   sanitization requirements, BitLocker encryption is the primary protection layer.
+#   For machines requiring certified sanitization (e.g. before disposal), use vendor-
+#   provided secure erase tools or cryptographic erase where supported. Enter N to
+#   defer and run cipher /w:C manually when ready, or skip if your C: drive uses
+#   full-disk encryption.
 # =============================================================================
-Write-Host "`n--- FINAL STEP: FREE SPACE WIPE ---" -ForegroundColor Cyan
-Write-Host "cipher /w:C overwrites all deleted file remnants on C: drive." -ForegroundColor Yellow
+Write-Host "`n--- FINAL STEP: FREE SPACE WIPE (OPTIONAL) ---" -ForegroundColor Cyan
+Write-Host "cipher /w:C overwrites unallocated space on C:. Effectiveness varies by storage type:" -ForegroundColor Yellow
+Write-Host "  HDD: Appropriate for magnetic disks (NIST SP 800-88 R2)" -ForegroundColor Gray
+Write-Host "  SSD: Limited effectiveness due to wear-leveling and TRIM" -ForegroundColor Gray
+Write-Host "  For device disposal: Use manufacturer-supported secure erase or crypto erase" -ForegroundColor Gray
 Write-Host "This can take 10-60 minutes. Do not close this window while it runs." -ForegroundColor Yellow
 
 $CipherChoice = Read-Host "Run cipher /w:C now? (Y/N)"
