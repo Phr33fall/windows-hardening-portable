@@ -6,7 +6,13 @@ A portable, fully documented Windows hardening script that works on any Windows 
 
 ## TL;DR
 
-Run this script as Administrator on any Windows machine. It auto-detects the admin account, machine name, and OneDrive path. It takes a pre-change backup before touching anything, applies 17 hardening sections, verifies the result, installs Windows and application updates, registers two weekly maintenance tasks, and produces a colour-coded summary at the end. Interactive mode lets you step through each change and approve or skip it individually.
+I created this because I got fed up of manually setting up my own and friends/family local accounts
+
+Run this script as Administrator on any Windows machine. It will auto-detect the admin account, machine name, and OneDrive path. It takes a pre-change backup before touching anything, applies 17 hardening sections, verifies the result, installs Windows and application updates, registers two weekly maintenance tasks, and produces a colour-coded summary at the end. 
+
+It has two modes. Auto, or interactive. Auto will run through everything at the click of a couple of buttonns, where as interactive mode lets you step through each change and approve or skip it individually.
+
+![image](https://github.com/user-attachments/assets/4cd3d198-9edf-483b-bd45-27b74f566310)
 
 ---
 
