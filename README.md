@@ -12,7 +12,7 @@ Run this script as Administrator on any Windows machine. It will auto-detect the
 
 It has two modes. Auto, or interactive. Auto will run through everything at the click of a couple of buttonns, where as interactive mode lets you step through each change and approve or skip it individually.
 
-![image](https://github.com/user-attachments/assets/4cd3d198-9edf-483b-bd45-27b74f566310)
+
 
 ---
 
