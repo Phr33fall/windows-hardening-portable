@@ -589,6 +589,38 @@ if (Should-Skip "ErrorReporting") {
 
 # -----------------------------------------------------------------------------
 # SECTION 6: PREFETCH AND SUPERFETCH
+#
+# INFO:
+#   Windows Prefetch logs every executable that has run, when it ran, and how
+#   many times. SysMain (Superfetch) analyses usage patterns and preloads
+#   frequently used applications into RAM to reduce load times.
+#
+#   These two features serve different purposes and should be treated differently
+#   based on disk type. Superfetch exists specifically to compensate for the slow
+#   random-read performance of spinning disks. On SSDs, random reads are fast
+#   enough that Superfetch provides minimal benefit and wastes RAM on speculative
+#   preloading. On HDDs, Superfetch measurably reduces application launch times
+#   and disabling it will noticeably degrade performance.
+#
+#   Prefetch file logging is a separate concern. Prefetch files are a forensic
+#   artefact recording execution history regardless of disk type. Disabling
+#   Prefetch file creation is appropriate on both SSDs and HDDs from a privacy
+#   and hardening perspective.
+#
+# BENEFITS:
+#   Disabling Prefetch removes a log that records every programme ever executed
+#   including deleted malware, providing cleaner forensic state after hardening.
+#   On SSD machines, disabling SysMain frees RAM used for unnecessary speculative
+#   preloading. Clearing existing Prefetch files removes the execution history
+#   built up prior to this hardening run.
+#
+# CONSIDERATIONS APPLYING:
+#   The script detects whether the C: drive is an SSD or HDD via WMI and applies
+#   Superfetch (SysMain) disablement only on SSD machines. On HDD machines,
+#   SysMain is left enabled to preserve application launch performance. Prefetch
+#   file creation is disabled on all machines. If the disk type cannot be
+#   determined via WMI, the script defaults to leaving SysMain enabled and logs
+#   a note so the operator can decide manually.
 # -----------------------------------------------------------------------------
 Write-Host "`n[6/17] Prefetch and Superfetch..." -ForegroundColor Yellow
 
@@ -596,19 +628,52 @@ if (Should-Skip "Prefetch") {
     Write-Host "  Already completed in previous run. Skipping." -ForegroundColor DarkGray
     Record-Section "Prefetch" "RESUMED-SKIP"
 } elseif (Confirm-Section -SectionName "Prefetch and Superfetch (SysMain)" `
-    -Info "Windows Prefetch logs every executable that has run, when it ran, and how many times. SysMain analyses usage patterns and preloads frequently used applications into RAM. Together these create detailed forensic logs of system activity." `
-    -Benefits "Disabling Prefetch removes a log that records every programme ever executed including deleted malware. On SSD machines application load times are already fast enough. Disabling SysMain frees RAM used for speculative preloading." `
-    -Considerations "On HDD-based machines disabling Superfetch will noticeably slow application launch times. Only disable on SSD machines. Setting EnablePrefetcher to 0 disables both Prefetch file creation and the boot prefetcher.") {
+    -Info "Windows Prefetch logs every executable that has run, when it ran, and how many times. SysMain (Superfetch) analyses usage patterns and preloads applications into RAM. Superfetch is specifically designed to compensate for slow random-read performance on HDDs. On SSDs it provides minimal benefit. Prefetch file logging is a forensic artefact that is worth disabling on all disk types." `
+    -Benefits "Disabling Prefetch removes a forensic log of every executable ever run on the machine including deleted malware. On SSD machines, disabling SysMain frees RAM used for unnecessary speculative preloading. The script detects disk type automatically and preserves SysMain on HDDs where it meaningfully improves performance." `
+    -Considerations "Superfetch is detected and disabled only on SSD machines. On HDD machines SysMain is left active to preserve application launch performance. If disk type detection via WMI fails, SysMain is left enabled and a note is logged. Prefetch file creation (EnablePrefetcher) is set to 0 on all machines regardless of disk type.") {
+
+    # Detect disk type for C: drive via WMI
+    $CIsSSD = $false
+    try {
+        $CDrive = Get-Partition -DriveLetter C -ErrorAction Stop
+        $CDisk  = Get-PhysicalDisk -ErrorAction Stop | Where-Object { $_.DeviceId -eq $CDrive.DiskNumber }
+        if ($CDisk) {
+            if ($CDisk.MediaType -eq "SSD" -or $CDisk.SpindleSpeed -eq 0) {
+                $CIsSSD = $true
+                Write-Host "  Disk type detected: SSD" -ForegroundColor Gray
+            } else {
+                Write-Host "  Disk type detected: HDD (Superfetch will be preserved)" -ForegroundColor Gray
+            }
+        } else {
+            Write-Host "  NOTE: Disk type could not be determined via WMI. SysMain left enabled." -ForegroundColor Yellow
+            $Warnings += "Section 6: Disk type detection failed. Superfetch (SysMain) left enabled. Review manually."
+        }
+    } catch {
+        Write-Host "  NOTE: Disk type detection failed. SysMain left enabled." -ForegroundColor Yellow
+        $Warnings += "Section 6: Disk type detection failed ($($_.Exception.Message)). Superfetch (SysMain) left enabled. Review manually."
+    }
 
     $PrefetchKey = "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management\PrefetchParameters"
+
+    # Disable Prefetch file creation on all machines (forensic artefact regardless of disk type)
     Set-ItemProperty -Path $PrefetchKey -Name "EnablePrefetcher" -Value 0 -Type DWord -ErrorAction SilentlyContinue
-    Set-ItemProperty -Path $PrefetchKey -Name "EnableSuperfetch" -Value 0 -Type DWord -ErrorAction SilentlyContinue
-    Stop-Service -Name "SysMain" -Force -ErrorAction SilentlyContinue
-    Set-Service -Name "SysMain" -StartupType Disabled -ErrorAction SilentlyContinue
+
+    # Only disable Superfetch/SysMain on SSD machines
+    if ($CIsSSD) {
+        Set-ItemProperty -Path $PrefetchKey -Name "EnableSuperfetch" -Value 0 -Type DWord -ErrorAction SilentlyContinue
+        Stop-Service -Name "SysMain" -Force -ErrorAction SilentlyContinue
+        Set-Service -Name "SysMain" -StartupType Disabled -ErrorAction SilentlyContinue
+        Write-Host "  SysMain disabled (SSD detected)." -ForegroundColor Green
+    } else {
+        Write-Host "  SysMain preserved (HDD detected or disk type unknown)." -ForegroundColor Gray
+    }
+
+    # Clear existing Prefetch files on all machines
     $PrefetchFolder = "C:\Windows\Prefetch"
     If (Test-Path $PrefetchFolder) {
         Get-ChildItem $PrefetchFolder -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
     }
+
     Write-Host "  Done." -ForegroundColor Green
     Record-Section "Prefetch" "APPLIED"
 } else { Write-Host "  Skipped." -ForegroundColor DarkGray; Record-Section "Prefetch" "SKIPPED" }
@@ -1498,7 +1563,7 @@ Write-Progress-Log "=== Hardening run completed. Verify failures: $($VerifyFaile
 # =============================================================================
 Write-Host "`n--- FINAL STEP: FREE SPACE WIPE (OPTIONAL) ---" -ForegroundColor Cyan
 Write-Host "cipher /w:C overwrites unallocated space on C:. Effectiveness varies by storage type:" -ForegroundColor Yellow
-Write-Host "  HDD: Appropriate for magnetic disks (NIST SP 800-88 R2)" -ForegroundColor Gray
+Write-Host "  HDD: Appropriate for magnetic disks when verified (NIST SP 800-88 R2)" -ForegroundColor Gray
 Write-Host "  SSD: Limited effectiveness due to wear-leveling and TRIM" -ForegroundColor Gray
 Write-Host "  For device disposal: Use manufacturer-supported secure erase or crypto erase" -ForegroundColor Gray
 Write-Host "This can take 10-60 minutes. Do not close this window while it runs." -ForegroundColor Yellow
