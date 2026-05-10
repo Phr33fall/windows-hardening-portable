@@ -14,6 +14,10 @@ It has two modes. Auto, or interactive. Auto will run through everything at the 
 
 
 
+<p align="center">
+  <img src="assets/windows-hardening-preview.jpeg" alt="Windows Hardening Portable running in interactive mode" width="900">
+</p>
+
 ---
 
 ## Features
