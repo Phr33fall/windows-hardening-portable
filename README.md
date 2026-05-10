@@ -57,6 +57,7 @@ Set-ExecutionPolicy RemoteSigned -Scope CurrentUser
 .\Harden-Windows-Portable-Documented.ps1
 ```
 
+
 5. Review the auto-detected machine context displayed at startup
 6. Choose whether to restore from a previous pre-change backup if one exists
 7. Confirm you want to proceed
