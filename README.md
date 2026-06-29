@@ -28,6 +28,7 @@ It has two modes. Auto, or interactive. Auto will run through everything at the 
 - **Rollback capability** — if a previous run's pre-change backup exists, the script offers to restore the machine to its pre-hardening state before proceeding.
 - **Interruption protection** — Windows Update service is suspended during the run to prevent forced reboots mid-session. A progress log is written after each section. If interrupted, the next run detects the incomplete log and offers to resume from the last completed section.
 - **Post-hardening verification** — independently checks every key control after applying changes and flags any drift.
+- **Debloating** — removes and deprovisions consumer Store apps (Xbox, LinkedIn, Bing News/Weather, Solitaire, Clipchamp, Skype, Phone Link, consumer Teams Chat, and more) plus disables Cortana, in-OS ads, suggested content, the advertising ID, and Widgets. Work apps (Microsoft 365, Teams for work, Company Portal) are left untouched.
 - **Windows Update integration** — installs OS patches via PSWindowsUpdate and upgrades all third-party applications via winget immediately after hardening.
 - **Weekly scheduled tasks** — registers `WindowsAdminBackup` (Sunday 08:00) and `WeeklyWingetUpgrade` (Sunday 09:00) with `StartWhenAvailable` so missed runs catch up on next startup. The backup script is self-contained and written to disk automatically — no separate file required.
 - **Colour-coded summary table** — every section, its status, and all verification results displayed clearly at the end.
@@ -157,7 +158,7 @@ If something goes wrong after hardening, re-run the script. It will detect the `
 - Service startup types via registry Start values
 - DNS server addresses per adapter
 
-Note: file deletions (thumbnail cache, prefetch, WER dumps) cannot be restored. Full disk encryption via BitLocker provides the stronger guarantee for data at rest.
+Note: file deletions (thumbnail cache, prefetch, WER dumps) and removed Store apps cannot be restored by the rollback. Reinstall any removed app from the Microsoft Store if it is later needed. Full disk encryption via BitLocker provides the stronger guarantee for data at rest.
 
 ---
 
@@ -196,6 +197,8 @@ Tested on Windows 11 Pro. Compatible with Windows 10 and Windows 11 Home and Pro
 - Do not run this script on machines managed by Microsoft Family Safety. It will break parental controls. Use the companion script `Maintain-ChildAccount-Portable` instead.
 - Do not run this script on corporate-managed machines without checking Group Policy first. Enterprise GPO may override or conflict with some settings.
 - A reboot is recommended after the script completes, particularly after the DNS over HTTPS and Delivery Optimisation sections.
+- Section 19 disables local-account security questions. If you rely on the login-screen question reset for a local account, keep an alternative recovery route (a second admin account, or the password recorded in a password manager) before applying.
+- Windows Copilot is intentionally **not** disabled by this script. Add it separately if your build requires it.
 
 ---
 
