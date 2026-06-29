@@ -31,7 +31,7 @@ It has two modes. Auto, or interactive. Auto will run through everything at the 
 - **Windows Update integration** — installs OS patches via PSWindowsUpdate and upgrades all third-party applications via winget immediately after hardening.
 - **Weekly scheduled tasks** — registers `WindowsAdminBackup` (Sunday 08:00) and `WeeklyWingetUpgrade` (Sunday 09:00) with `StartWhenAvailable` so missed runs catch up on next startup. The backup script is self-contained and written to disk automatically — no separate file required.
 - **Colour-coded summary table** — every section, its status, and all verification results displayed clearly at the end.
-- **Free space wipe** — optional `cipher /w:C` at the end to overwrite deleted file remnants (3-pass: 0x00, 0xFF, random).
+- **Free space wipe (disk-aware)** — optional `cipher /w:C` at the end to overwrite deleted file remnants. The script auto-detects the C: disk type and recommends against the wipe on SSDs (defaulting the prompt to skip), while offering it as a sensible option on HDDs.
 
 ---
 
@@ -116,7 +116,7 @@ Registers `WindowsAdminBackup` (Sunday 08:00) and `WeeklyWingetUpgrade` (Sunday 
 Installs PSWindowsUpdate module if not present. Applies all pending Windows OS and driver patches. Runs `winget upgrade --all` for third-party applications.
 
 ### Final — Cipher Wipe
-Prompts whether to run `cipher /w:C` to overwrite all deleted file remnants on C: with a three-pass wipe (0x00, 0xFF, random). Can be deferred and run manually.
+Auto-detects the C: disk type via WMI. On an **SSD** it recommends against the wipe and defaults the prompt to skip (wear-leveling and TRIM make the overwrite unreliable and it adds needless write wear — rely on BitLocker, or a vendor secure-erase for disposal). On an **HDD** it offers `cipher /w:C` to overwrite deleted file remnants. Can be deferred and run manually.
 
 ---
 

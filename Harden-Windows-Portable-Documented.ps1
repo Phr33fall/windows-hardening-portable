@@ -1839,29 +1839,71 @@ Write-Progress-Log "=== Hardening run completed. Verify failures: $($VerifyFaile
 #
 # CONSIDERATIONS APPLYING:
 #   cipher /w typically takes 10 to 60 minutes depending on free space and disk
-#   speed. The window must remain open until it completes. For SSDs without formal
-#   sanitization requirements, BitLocker encryption is the primary protection layer.
-#   For machines requiring certified sanitization (e.g. before disposal), use vendor-
-#   provided secure erase tools or cryptographic erase where supported. Enter N to
-#   defer and run cipher /w:C manually when ready, or skip if your C: drive uses
-#   full-disk encryption.
+#   speed. The window must remain open until it completes. The script auto-detects
+#   the C: disk type via WMI. On an SSD it recommends AGAINST the wipe and defaults
+#   the prompt to No (skip), because wear-leveling and TRIM make the overwrite
+#   unreliable and it adds needless write wear; BitLocker encryption is the primary
+#   protection layer there. On an HDD the wipe is offered as a sensible option. If
+#   the disk type cannot be determined, the prompt defaults to the manual Y/N choice
+#   with a caution to skip on SSDs. For machines requiring certified sanitization
+#   (e.g. before disposal), use vendor-provided secure erase or cryptographic erase.
 # =============================================================================
 Write-Host "`n--- FINAL STEP: FREE SPACE WIPE (OPTIONAL) ---" -ForegroundColor Cyan
 Write-Host "cipher /w:C overwrites unallocated space on C:. Effectiveness varies by storage type:" -ForegroundColor Yellow
 Write-Host "  HDD: Appropriate for magnetic disks when verified (NIST SP 800-88 R2)" -ForegroundColor Gray
 Write-Host "  SSD: Limited effectiveness due to wear-leveling and TRIM" -ForegroundColor Gray
 Write-Host "  For device disposal: Use manufacturer-supported secure erase or crypto erase" -ForegroundColor Gray
-Write-Host "This can take 10-60 minutes. Do not close this window while it runs." -ForegroundColor Yellow
 
-$CipherChoice = Read-Host "Run cipher /w:C now? (Y/N)"
-if ($CipherChoice -eq "Y" -or $CipherChoice -eq "y") {
+# Detect disk type for C: so we can recommend for/against the wipe.
+# Mirrors the WMI detection used in Section 6 (Prefetch/Superfetch).
+$CipherDiskIsSSD = $false
+$CipherDiskKnown = $false
+try {
+    $CDrive = Get-Partition -DriveLetter C -ErrorAction Stop
+    $CDisk  = Get-PhysicalDisk -ErrorAction Stop | Where-Object { $_.DeviceId -eq $CDrive.DiskNumber }
+    if ($CDisk) {
+        $CipherDiskKnown = $true
+        if ($CDisk.MediaType -eq "SSD" -or $CDisk.SpindleSpeed -eq 0) { $CipherDiskIsSSD = $true }
+    }
+} catch {
+    $CipherDiskKnown = $false
+}
+
+if ($CipherDiskIsSSD) {
+    # SSD: cipher /w is not reliable and adds avoidable write wear. Default to skip.
+    Write-Host "`nDisk type detected: SSD." -ForegroundColor Gray
+    Write-Host "RECOMMENDATION: Do NOT run cipher /w:C on this SSD." -ForegroundColor Green
+    Write-Host "  Wear-leveling and TRIM make the overwrite unreliable, and it adds needless write wear." -ForegroundColor Gray
+    Write-Host "  Rely on BitLocker full-disk encryption for data-at-rest protection. For disposal, use the" -ForegroundColor Gray
+    Write-Host "  drive manufacturer's secure-erase / cryptographic-erase tool instead." -ForegroundColor Gray
+    $CipherChoice = Read-Host "Override and run cipher /w:C anyway? (y/N)"
+    $RunCipher = ($CipherChoice -eq "Y" -or $CipherChoice -eq "y")
+    if (-not $RunCipher) {
+        Write-Host "`nFree space wipe skipped (recommended for SSD)." -ForegroundColor Green
+        Write-Progress-Log "Cipher free space wipe skipped (SSD detected, recommended)."
+    }
+} else {
+    if ($CipherDiskKnown) {
+        Write-Host "`nDisk type detected: HDD." -ForegroundColor Gray
+        Write-Host "On a magnetic disk, cipher /w:C is an appropriate way to clear deleted-file remnants." -ForegroundColor Gray
+    } else {
+        Write-Host "`nDisk type could not be determined via WMI." -ForegroundColor Yellow
+        Write-Host "If C: is an SSD, skip this (use BitLocker / vendor secure-erase instead)." -ForegroundColor Gray
+    }
+    Write-Host "This can take 10-60 minutes. Do not close this window while it runs." -ForegroundColor Yellow
+    $CipherChoice = Read-Host "Run cipher /w:C now? (Y/N)"
+    $RunCipher = ($CipherChoice -eq "Y" -or $CipherChoice -eq "y")
+    if (-not $RunCipher) {
+        Write-Host "`nFree space wipe skipped. Run 'cipher /w:C' manually when ready." -ForegroundColor Yellow
+        Write-Progress-Log "Cipher free space wipe skipped by operator."
+    }
+}
+
+if ($RunCipher) {
     Write-Host "`nRunning cipher /w:C - do not close this window..." -ForegroundColor Cyan
     cipher /w:C
     Write-Host "`nFree space wipe complete." -ForegroundColor Green
-    Write-Progress-Log "Cipher free space wipe completed."
-} else {
-    Write-Host "`nFree space wipe skipped. Run 'cipher /w:C' manually when ready." -ForegroundColor Yellow
-    Write-Progress-Log "Cipher free space wipe skipped by operator."
+    Write-Progress-Log "Cipher free space wipe completed (disk SSD=$CipherDiskIsSSD, known=$CipherDiskKnown)."
 }
 
 # Mark progress log as complete
