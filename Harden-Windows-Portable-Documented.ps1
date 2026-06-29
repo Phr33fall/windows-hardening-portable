@@ -21,7 +21,7 @@
 #
 # PHASES
 # Phase 0 - Detect:   machine context, rollback check, pre-change backup
-# Phase 1 - Apply:    17 hardening sections with optional interactive mode
+# Phase 1 - Apply:    22 hardening sections with optional interactive mode
 # Phase 2 - Verify:   independent state checks with drift detection
 # Phase 3 - Backup:   post-hardening state export
 # Phase 4 - Tasks:    weekly scheduled task registration
@@ -177,7 +177,7 @@ $PreCopyDest = "$ScriptBase\PRE-CHANGE-LATEST"
 $RegistryRollbackTargets = @(
     [PSCustomObject]@{ Name = "Telemetry";            RegPath = "HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\Windows\DataCollection";                                   PsPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection";                                   Values = @("AllowTelemetry") },
     [PSCustomObject]@{ Name = "PrefetchParameters";   RegPath = "HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management\PrefetchParameters"; PsPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management\PrefetchParameters"; Values = @("EnablePrefetcher","EnableSuperfetch") },
-    [PSCustomObject]@{ Name = "ActivityHistory";      RegPath = "HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\Windows\System";                                           PsPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\System";                                           Values = @("EnableActivityFeed","PublishUserActivities","UploadUserActivities") },
+    [PSCustomObject]@{ Name = "ActivityHistory";      RegPath = "HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\Windows\System";                                           PsPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\System";                                           Values = @("EnableActivityFeed","PublishUserActivities","UploadUserActivities","NoLocalPasswordResetQuestions") },
     [PSCustomObject]@{ Name = "DeliveryOptimisation"; RegPath = "HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\Windows\DeliveryOptimization";                            PsPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\DeliveryOptimization";                            Values = @("DODownloadMode") },
     [PSCustomObject]@{ Name = "WindowsInk";           RegPath = "HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\WindowsInkWorkspace";                                      PsPath = "HKLM:\SOFTWARE\Policies\Microsoft\WindowsInkWorkspace";                                      Values = @("AllowWindowsInkWorkspace") },
     [PSCustomObject]@{ Name = "ErrorReporting";       RegPath = "HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\Windows\Windows Error Reporting";                         PsPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Error Reporting";                         Values = @("Disabled") },
@@ -185,7 +185,12 @@ $RegistryRollbackTargets = @(
     [PSCustomObject]@{ Name = "LocationTracking";     RegPath = "HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\Windows\LocationAndSensors";                              PsPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\LocationAndSensors";                              Values = @("DisableLocation") },
     [PSCustomObject]@{ Name = "AuditPolicy";          RegPath = "HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\EventLog";                                           PsPath = "HKLM:\SYSTEM\CurrentControlSet\Services\EventLog";                                           Values = @() },
     [PSCustomObject]@{ Name = "DoH";                  RegPath = "HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\Dnscache\Parameters";                               PsPath = "HKLM:\SYSTEM\CurrentControlSet\Services\Dnscache\Parameters";                               Values = @("EnableAutoDoh") },
-    [PSCustomObject]@{ Name = "CloudflareDoH";        RegPath = "HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\Dnscache\Parameters\DohWellKnownServers\1.1.1.1";    PsPath = "HKLM:\SYSTEM\CurrentControlSet\Services\Dnscache\Parameters\DohWellKnownServers\1.1.1.1";    Values = @("DohFlags","Template") }
+    [PSCustomObject]@{ Name = "CloudflareDoH";        RegPath = "HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\Dnscache\Parameters\DohWellKnownServers\1.1.1.1";    PsPath = "HKLM:\SYSTEM\CurrentControlSet\Services\Dnscache\Parameters\DohWellKnownServers\1.1.1.1";    Values = @("DohFlags","Template") },
+    [PSCustomObject]@{ Name = "WindowsSearchPolicy";  RegPath = "HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\Windows\Windows Search";                                  PsPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search";                                  Values = @("AllowCortana","DisableWebSearch","ConnectedSearchUseWeb","AllowSearchToUseLocation") },
+    [PSCustomObject]@{ Name = "CloudContent";         RegPath = "HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\Windows\CloudContent";                                    PsPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent";                                    Values = @("DisableWindowsConsumerFeatures","DisableConsumerAccountStateContent","DisableSoftLanding","DisableWindowsSpotlightFeatures") },
+    [PSCustomObject]@{ Name = "AdvertisingInfo";      RegPath = "HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\Windows\AdvertisingInfo";                                 PsPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\AdvertisingInfo";                                 Values = @("DisabledByGroupPolicy") },
+    [PSCustomObject]@{ Name = "Widgets";              RegPath = "HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\Dsh";                                                     PsPath = "HKLM:\SOFTWARE\Policies\Microsoft\Dsh";                                                     Values = @("AllowNewsAndInterests") },
+    [PSCustomObject]@{ Name = "AppCompat";            RegPath = "HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\Windows\AppCompat";                                       PsPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppCompat";                                       Values = @("AITEnable","DisableInventory","DisableUAR") }
 )
 
 if (Test-Path $PreCopyDest) {
@@ -463,7 +468,7 @@ try {
 # -----------------------------------------------------------------------------
 # SECTION 1: THUMBNAIL CACHE
 # -----------------------------------------------------------------------------
-Write-Host "`n[1/17] Thumbnail Cache..." -ForegroundColor Yellow
+Write-Host "`n[1/22] Thumbnail Cache..." -ForegroundColor Yellow
 
 if (Should-Skip "ThumbnailCache") {
     Write-Host "  Already completed in previous run. Skipping." -ForegroundColor DarkGray
@@ -488,7 +493,7 @@ if (Should-Skip "ThumbnailCache") {
 # -----------------------------------------------------------------------------
 # SECTION 2: WINDOWS SEARCH INDEX
 # -----------------------------------------------------------------------------
-Write-Host "`n[2/17] Windows Search Index..." -ForegroundColor Yellow
+Write-Host "`n[2/22] Windows Search Index..." -ForegroundColor Yellow
 
 if (Should-Skip "WindowsSearch") {
     Write-Host "  Already completed in previous run. Skipping." -ForegroundColor DarkGray
@@ -510,7 +515,7 @@ if (Should-Skip "WindowsSearch") {
 # -----------------------------------------------------------------------------
 # SECTION 3: HIBERNATION AND FAST STARTUP
 # -----------------------------------------------------------------------------
-Write-Host "`n[3/17] Hibernation and Fast Startup..." -ForegroundColor Yellow
+Write-Host "`n[3/22] Hibernation and Fast Startup..." -ForegroundColor Yellow
 
 if (Should-Skip "Hibernation") {
     Write-Host "  Already completed in previous run. Skipping." -ForegroundColor DarkGray
@@ -531,7 +536,7 @@ if (Should-Skip "Hibernation") {
 # -----------------------------------------------------------------------------
 # SECTION 4: TELEMETRY
 # -----------------------------------------------------------------------------
-Write-Host "`n[4/17] Telemetry..." -ForegroundColor Yellow
+Write-Host "`n[4/22] Telemetry..." -ForegroundColor Yellow
 
 if (Should-Skip "Telemetry") {
     Write-Host "  Already completed in previous run. Skipping." -ForegroundColor DarkGray
@@ -558,7 +563,7 @@ if (Should-Skip "Telemetry") {
 # -----------------------------------------------------------------------------
 # SECTION 5: WINDOWS ERROR REPORTING
 # -----------------------------------------------------------------------------
-Write-Host "`n[5/17] Windows Error Reporting..." -ForegroundColor Yellow
+Write-Host "`n[5/22] Windows Error Reporting..." -ForegroundColor Yellow
 
 if (Should-Skip "ErrorReporting") {
     Write-Host "  Already completed in previous run. Skipping." -ForegroundColor DarkGray
@@ -622,7 +627,7 @@ if (Should-Skip "ErrorReporting") {
 #   determined via WMI, the script defaults to leaving SysMain enabled and logs
 #   a note so the operator can decide manually.
 # -----------------------------------------------------------------------------
-Write-Host "`n[6/17] Prefetch and Superfetch..." -ForegroundColor Yellow
+Write-Host "`n[6/22] Prefetch and Superfetch..." -ForegroundColor Yellow
 
 if (Should-Skip "Prefetch") {
     Write-Host "  Already completed in previous run. Skipping." -ForegroundColor DarkGray
@@ -682,7 +687,7 @@ if (Should-Skip "Prefetch") {
 # -----------------------------------------------------------------------------
 # SECTION 7: RECENT FILES AND JUMP LISTS
 # -----------------------------------------------------------------------------
-Write-Host "`n[7/17] Recent Files, Jump Lists and Orphaned Run Keys..." -ForegroundColor Yellow
+Write-Host "`n[7/22] Recent Files, Jump Lists and Orphaned Run Keys..." -ForegroundColor Yellow
 
 if (Should-Skip "RecentFiles") {
     Write-Host "  Already completed in previous run. Skipping." -ForegroundColor DarkGray
@@ -742,7 +747,7 @@ if (Should-Skip "RecentFiles") {
 # -----------------------------------------------------------------------------
 # SECTION 8: LOCATION TRACKING
 # -----------------------------------------------------------------------------
-Write-Host "`n[8/17] Location Tracking..." -ForegroundColor Yellow
+Write-Host "`n[8/22] Location Tracking..." -ForegroundColor Yellow
 
 if (Should-Skip "LocationTracking") {
     Write-Host "  Already completed in previous run. Skipping." -ForegroundColor DarkGray
@@ -767,7 +772,7 @@ if (Should-Skip "LocationTracking") {
 # -----------------------------------------------------------------------------
 # SECTION 9: DELIVERY OPTIMISATION
 # -----------------------------------------------------------------------------
-Write-Host "`n[9/17] Delivery Optimisation..." -ForegroundColor Yellow
+Write-Host "`n[9/22] Delivery Optimisation..." -ForegroundColor Yellow
 
 if (Should-Skip "DeliveryOptimisation") {
     Write-Host "  Already completed in previous run. Skipping." -ForegroundColor DarkGray
@@ -793,7 +798,7 @@ if (Should-Skip "DeliveryOptimisation") {
 # -----------------------------------------------------------------------------
 # SECTION 10: ACTIVITY HISTORY AND CONNECTED DEVICES PLATFORM
 # -----------------------------------------------------------------------------
-Write-Host "`n[10/17] Activity History and CDP..." -ForegroundColor Yellow
+Write-Host "`n[10/22] Activity History and CDP..." -ForegroundColor Yellow
 
 if (Should-Skip "ActivityHistory") {
     Write-Host "  Already completed in previous run. Skipping." -ForegroundColor DarkGray
@@ -821,7 +826,7 @@ if (Should-Skip "ActivityHistory") {
 # -----------------------------------------------------------------------------
 # SECTION 11: WINDOWS INK AND HANDWRITING
 # -----------------------------------------------------------------------------
-Write-Host "`n[11/17] Windows Ink and Handwriting..." -ForegroundColor Yellow
+Write-Host "`n[11/22] Windows Ink and Handwriting..." -ForegroundColor Yellow
 
 if (Should-Skip "WindowsInk") {
     Write-Host "  Already completed in previous run. Skipping." -ForegroundColor DarkGray
@@ -850,7 +855,7 @@ if (Should-Skip "WindowsInk") {
 # -----------------------------------------------------------------------------
 # SECTION 12: NETWORK HARDENING - LLMNR AND NETBIOS
 # -----------------------------------------------------------------------------
-Write-Host "`n[12/17] Network Hardening (LLMNR and NetBIOS)..." -ForegroundColor Yellow
+Write-Host "`n[12/22] Network Hardening (LLMNR and NetBIOS)..." -ForegroundColor Yellow
 
 if (Should-Skip "NetworkHardening") {
     Write-Host "  Already completed in previous run. Skipping." -ForegroundColor DarkGray
@@ -873,7 +878,7 @@ if (Should-Skip "NetworkHardening") {
 # -----------------------------------------------------------------------------
 # SECTION 13: POWER PLAN
 # -----------------------------------------------------------------------------
-Write-Host "`n[13/17] Power Plan..." -ForegroundColor Yellow
+Write-Host "`n[13/22] Power Plan..." -ForegroundColor Yellow
 
 if (Should-Skip "PowerPlan") {
     Write-Host "  Already completed in previous run. Skipping." -ForegroundColor DarkGray
@@ -913,7 +918,7 @@ if (Should-Skip "PowerPlan") {
 # -----------------------------------------------------------------------------
 # SECTION 14: SCHEDULED TASK CLEANUP
 # -----------------------------------------------------------------------------
-Write-Host "`n[14/17] Scheduled Task Cleanup..." -ForegroundColor Yellow
+Write-Host "`n[14/22] Scheduled Task Cleanup..." -ForegroundColor Yellow
 
 if (Should-Skip "TaskCleanup") {
     Write-Host "  Already completed in previous run. Skipping." -ForegroundColor DarkGray
@@ -938,7 +943,7 @@ if (Should-Skip "TaskCleanup") {
 # -----------------------------------------------------------------------------
 # SECTION 15: SERVICE DEPENDENCIES
 # -----------------------------------------------------------------------------
-Write-Host "`n[15/17] Service Dependencies..." -ForegroundColor Yellow
+Write-Host "`n[15/22] Service Dependencies..." -ForegroundColor Yellow
 
 if (Should-Skip "ServiceDependencies") {
     Write-Host "  Already completed in previous run. Skipping." -ForegroundColor DarkGray
@@ -1003,7 +1008,7 @@ if (Should-Skip "ServiceDependencies") {
 #   categories: logon/logoff, account logon, privilege use, and policy change.
 #   This is a deliberate minimal baseline, not a full audit configuration.
 # -----------------------------------------------------------------------------
-Write-Host "`n[16/17] Audit Policy Baseline..." -ForegroundColor Yellow
+Write-Host "`n[16/22] Audit Policy Baseline..." -ForegroundColor Yellow
 
 if (Should-Skip "AuditPolicy") {
     Write-Host "  Already completed in previous run. Skipping." -ForegroundColor DarkGray
@@ -1059,7 +1064,7 @@ if (Should-Skip "AuditPolicy") {
 #   system-wide DoH may break internal name resolution. Check with the
 #   network team before applying in an enterprise environment.
 # -----------------------------------------------------------------------------
-Write-Host "`n[17/17] DNS over HTTPS (System-wide)..." -ForegroundColor Yellow
+Write-Host "`n[17/22] DNS over HTTPS (System-wide)..." -ForegroundColor Yellow
 
 if (Should-Skip "DoH") {
     Write-Host "  Already completed in previous run. Skipping." -ForegroundColor DarkGray
@@ -1087,6 +1092,251 @@ if (Should-Skip "DoH") {
     Write-Host "  DoH configured. Using Cloudflare 1.1.1.1. Reboot required to take full effect." -ForegroundColor Green
     Record-Section "DoH" "APPLIED"
 } else { Write-Host "  Skipped." -ForegroundColor DarkGray; Record-Section "DoH" "SKIPPED" }
+
+
+# -----------------------------------------------------------------------------
+# SECTION 18: CORTANA AND WEB SEARCH
+# -----------------------------------------------------------------------------
+Write-Host "`n[18/22] Cortana and Web Search..." -ForegroundColor Yellow
+
+if (Should-Skip "Cortana") {
+    Write-Host "  Already completed in previous run. Skipping." -ForegroundColor DarkGray
+    Record-Section "Cortana" "RESUMED-SKIP"
+} elseif (Confirm-Section -SectionName "Cortana and Web Search" `
+    -Info "Cortana is Microsoft's voice assistant. Even when not used it runs in the background and integrates with Windows Search, sending search queries and partial keystrokes from the Start menu to Bing/Microsoft. The Start menu search box returns web results from Bing by default, meaning anything typed there leaves the machine." `
+    -Benefits "Setting AllowCortana to 0 disables Cortana entirely via policy. Disabling web search and connected search stops the Start menu sending typed queries to Bing, keeping local searches local. Reduces background activity and a constant outbound query channel. Appropriate for an office laptop where the assistant is not used." `
+    -Considerations "Applied via Group Policy registry keys (machine-wide) plus a per-user Bing toggle. Start menu search for installed apps and local files still works. Web answers in the Start menu will no longer appear. On managed devices an Intune/GPO policy may re-assert Cortana settings after reboot.") {
+
+    $SearchPolicyKey = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search"
+    If (!(Test-Path $SearchPolicyKey)) { New-Item -Path $SearchPolicyKey -Force | Out-Null }
+    Set-ItemProperty -Path $SearchPolicyKey -Name "AllowCortana" -Value 0 -Type DWord
+    Set-ItemProperty -Path $SearchPolicyKey -Name "DisableWebSearch" -Value 1 -Type DWord
+    Set-ItemProperty -Path $SearchPolicyKey -Name "ConnectedSearchUseWeb" -Value 0 -Type DWord
+    Set-ItemProperty -Path $SearchPolicyKey -Name "AllowSearchToUseLocation" -Value 0 -Type DWord
+
+    # Per-user Bing/Cortana toggles for the account running the script
+    $UserSearchKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Search"
+    If (!(Test-Path $UserSearchKey)) { New-Item -Path $UserSearchKey -Force | Out-Null }
+    Set-ItemProperty -Path $UserSearchKey -Name "BingSearchEnabled" -Value 0 -Type DWord -ErrorAction SilentlyContinue
+    Set-ItemProperty -Path $UserSearchKey -Name "CortanaConsent" -Value 0 -Type DWord -ErrorAction SilentlyContinue
+
+    # On Windows 11 the AllowCortana policy is deprecated and Cortana ships as a
+    # standalone Store app. Remove the app package (user + provisioned) so it is
+    # actually gone, not merely policy-disabled.
+    Get-AppxPackage -Name "Microsoft.549981C3F5F10" -ErrorAction SilentlyContinue |
+        ForEach-Object { Remove-AppxPackage -Package $_.PackageFullName -ErrorAction SilentlyContinue }
+    Get-AppxProvisionedPackage -Online -ErrorAction SilentlyContinue |
+        Where-Object { $_.DisplayName -eq "Microsoft.549981C3F5F10" } | ForEach-Object {
+            Remove-AppxProvisionedPackage -Online -PackageName $_.PackageName -ErrorAction SilentlyContinue | Out-Null
+        }
+
+    Write-Host "  Done." -ForegroundColor Green
+    Record-Section "Cortana" "APPLIED"
+} else { Write-Host "  Skipped." -ForegroundColor DarkGray; Record-Section "Cortana" "SKIPPED" }
+
+
+# -----------------------------------------------------------------------------
+# SECTION 19: LOCAL ACCOUNT SECURITY QUESTIONS
+# -----------------------------------------------------------------------------
+Write-Host "`n[19/22] Local Account Security Questions..." -ForegroundColor Yellow
+
+if (Should-Skip "SecurityQuestions") {
+    Write-Host "  Already completed in previous run. Skipping." -ForegroundColor DarkGray
+    Record-Section "SecurityQuestions" "RESUMED-SKIP"
+} elseif (Confirm-Section -SectionName "Local Account Security Questions" `
+    -Info "When a local account is created or its password changed, Windows prompts for three security questions and stores the answers locally. These answers act as an offline password-reset backdoor: anyone who can guess them (or who finds them written down) can reset the local account password from the login screen without knowing the current one. The questions are drawn from a fixed list and answers are often weak (pet name, first school)." `
+    -Benefits "Setting NoLocalPasswordResetQuestions to 1 removes the security-question prompt and disables the reset-via-questions path. Eliminates a low-effort local-account compromise vector that bypasses the actual password. Recommended on any device that does not rely on this offline reset mechanism." `
+    -Considerations "Applies to LOCAL accounts only. Microsoft accounts and Azure AD/Entra accounts reset via Microsoft's online flow and are unaffected. After applying, if a local account password is genuinely forgotten there is no security-question reset path, so ensure another recovery route exists (a second admin account, or a recorded password in your password manager).") {
+
+    $SystemPolicyKey = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\System"
+    If (!(Test-Path $SystemPolicyKey)) { New-Item -Path $SystemPolicyKey -Force | Out-Null }
+    Set-ItemProperty -Path $SystemPolicyKey -Name "NoLocalPasswordResetQuestions" -Value 1 -Type DWord
+
+    Write-Host "  Done." -ForegroundColor Green
+    Record-Section "SecurityQuestions" "APPLIED"
+} else { Write-Host "  Skipped." -ForegroundColor DarkGray; Record-Section "SecurityQuestions" "SKIPPED" }
+
+
+# -----------------------------------------------------------------------------
+# SECTION 20: CONSUMER BLOATWARE REMOVAL
+# -----------------------------------------------------------------------------
+Write-Host "`n[20/22] Consumer Bloatware Removal..." -ForegroundColor Yellow
+
+if (Should-Skip "Bloatware") {
+    Write-Host "  Already completed in previous run. Skipping." -ForegroundColor DarkGray
+    Record-Section "Bloatware" "RESUMED-SKIP"
+} elseif (Confirm-Section -SectionName "Consumer Bloatware Removal" `
+    -Info "A default Windows install ships with consumer Store apps that have no place on a business laptop: the Xbox suite, LinkedIn, Bing News and Weather, Solitaire, Clipchamp, Groove Music and Movies, the 3D apps, Skype, Maps, Phone Link, the consumer Teams 'Chat' stub, plus Get Help, Tips, Feedback Hub, Mixed Reality Portal and People. Several of these run background processes and report usage." `
+    -Benefits "Removing these reduces the attack surface, background telemetry, and disk footprint. Each app is removed for the current user AND deprovisioned from the Windows image, so it does not reinstall for newly created user profiles or get re-added by feature updates. Work apps (Microsoft 365, Teams for work, Company Portal) are not touched." `
+    -Considerations "Removal is not reversible via the registry rollback - reinstall any app from the Microsoft Store if it is later needed. The consumer Teams 'Chat' app (package MicrosoftTeams) is removed; Teams for work/school installed via Microsoft 365 is a separate product and is NOT affected. Phone Link (YourPhone) is removed per your selection. If a package is already absent the script silently continues.") {
+
+    $AppsToRemove = @(
+        "Microsoft.XboxApp","Microsoft.GamingApp","Microsoft.XboxGamingOverlay","Microsoft.XboxGameOverlay",
+        "Microsoft.XboxSpeechToTextOverlay","Microsoft.XboxIdentityProvider","Microsoft.Xbox.TCUI",
+        "Microsoft.LinkedIn","Microsoft.BingNews","Microsoft.BingWeather","Microsoft.BingSearch",
+        "Microsoft.MicrosoftSolitaireCollection","Microsoft.ZuneMusic","Microsoft.ZuneVideo",
+        "Clipchamp.Clipchamp","Microsoft.Microsoft3DViewer","Microsoft.3DBuilder","Microsoft.Print3D",
+        "Microsoft.SkypeApp","Microsoft.WindowsMaps","Microsoft.GetHelp","Microsoft.Getstarted",
+        "Microsoft.WindowsFeedbackHub","Microsoft.MixedReality.Portal","Microsoft.People",
+        "Microsoft.YourPhone","MicrosoftTeams"
+    )
+
+    $RemovedCount = 0
+    foreach ($App in $AppsToRemove) {
+        # Remove installed package for the current user
+        $Installed = Get-AppxPackage -Name $App -ErrorAction SilentlyContinue
+        if ($Installed) {
+            $Installed | ForEach-Object { Remove-AppxPackage -Package $_.PackageFullName -ErrorAction SilentlyContinue }
+            Write-Host "  Removed (user): $App" -ForegroundColor Green
+            $RemovedCount++
+        }
+        # Deprovision from the image so it does not return for new profiles or after updates
+        Get-AppxProvisionedPackage -Online -ErrorAction SilentlyContinue |
+            Where-Object { $_.DisplayName -eq $App } | ForEach-Object {
+                Remove-AppxProvisionedPackage -Online -PackageName $_.PackageName -ErrorAction SilentlyContinue | Out-Null
+                Write-Host "  Deprovisioned: $App" -ForegroundColor Green
+            }
+    }
+
+    Write-Host "  Bloatware pass complete. $RemovedCount app(s) removed for current user." -ForegroundColor Green
+    Record-Section "Bloatware" "APPLIED"
+} else { Write-Host "  Skipped." -ForegroundColor DarkGray; Record-Section "Bloatware" "SKIPPED" }
+
+
+# -----------------------------------------------------------------------------
+# SECTION 21: CONSUMER EXPERIENCES, ADS AND SUGGESTED CONTENT
+# -----------------------------------------------------------------------------
+Write-Host "`n[21/22] Consumer Experiences, Ads and Suggestions..." -ForegroundColor Yellow
+
+if (Should-Skip "ConsumerExperiences") {
+    Write-Host "  Already completed in previous run. Skipping." -ForegroundColor DarkGray
+    Record-Section "ConsumerExperiences" "RESUMED-SKIP"
+} elseif (Confirm-Section -SectionName "Consumer Experiences, Ads and Suggested Content" `
+    -Info "Windows silently installs promoted third-party apps ('Windows consumer features'), shows suggested apps and ads in the Start menu, displays Spotlight ads and 'fun facts' on the lock screen, assigns every user an advertising ID for cross-app ad tracking, and uses diagnostic data to deliver 'tailored experiences' (targeted tips and ads). The Widgets board and News & Interests feed pull a constant stream of MSN content and trackers." `
+    -Benefits "Disabling consumer features stops Windows auto-installing promoted apps. Turning off suggested content, Spotlight, and the advertising ID removes in-OS advertising and a cross-app tracking identifier. Disabling tailored experiences stops diagnostic data being used to target you. Disabling Widgets/News removes the MSN content and tracking surface. A cleaner, quieter, ad-free office desktop." `
+    -Considerations "Machine-wide ad/consumer settings are policy keys; per-user suggestion toggles apply to the account running the script. The Start menu and lock screen will show no suggestions or Spotlight imagery (a static lock screen image remains). Widgets are disabled per your selection. None of this affects legitimate work apps or notifications.") {
+
+    # Stop auto-installed promoted apps and Spotlight ads (machine policy)
+    $CloudContentKey = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent"
+    If (!(Test-Path $CloudContentKey)) { New-Item -Path $CloudContentKey -Force | Out-Null }
+    Set-ItemProperty -Path $CloudContentKey -Name "DisableWindowsConsumerFeatures" -Value 1 -Type DWord
+    Set-ItemProperty -Path $CloudContentKey -Name "DisableConsumerAccountStateContent" -Value 1 -Type DWord
+    Set-ItemProperty -Path $CloudContentKey -Name "DisableSoftLanding" -Value 1 -Type DWord
+    Set-ItemProperty -Path $CloudContentKey -Name "DisableWindowsSpotlightFeatures" -Value 1 -Type DWord
+
+    # Advertising ID off (machine policy + per-user value)
+    $AdvInfoPolicy = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\AdvertisingInfo"
+    If (!(Test-Path $AdvInfoPolicy)) { New-Item -Path $AdvInfoPolicy -Force | Out-Null }
+    Set-ItemProperty -Path $AdvInfoPolicy -Name "DisabledByGroupPolicy" -Value 1 -Type DWord
+    $AdvInfoUser = "HKCU:\Software\Microsoft\Windows\CurrentVersion\AdvertisingInfo"
+    If (!(Test-Path $AdvInfoUser)) { New-Item -Path $AdvInfoUser -Force | Out-Null }
+    Set-ItemProperty -Path $AdvInfoUser -Name "Enabled" -Value 0 -Type DWord -ErrorAction SilentlyContinue
+
+    # Tailored experiences with diagnostic data off (per-user)
+    $PrivacyKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Privacy"
+    If (!(Test-Path $PrivacyKey)) { New-Item -Path $PrivacyKey -Force | Out-Null }
+    Set-ItemProperty -Path $PrivacyKey -Name "TailoredExperiencesWithDiagnosticDataEnabled" -Value 0 -Type DWord -ErrorAction SilentlyContinue
+
+    # Start menu / lock screen suggestions and Spotlight (per-user ContentDeliveryManager)
+    $CDMKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager"
+    If (!(Test-Path $CDMKey)) { New-Item -Path $CDMKey -Force | Out-Null }
+    foreach ($v in @(
+        "SilentInstalledAppsEnabled","SystemPaneSuggestionsEnabled","SoftLandingEnabled",
+        "RotatingLockScreenEnabled","RotatingLockScreenOverlayEnabled","SubscribedContentEnabled",
+        "SubscribedContent-338387Enabled","SubscribedContent-338388Enabled","SubscribedContent-338389Enabled",
+        "SubscribedContent-338393Enabled","SubscribedContent-353694Enabled","SubscribedContent-353696Enabled",
+        "SubscribedContent-310093Enabled","OemPreInstalledAppsEnabled","PreInstalledAppsEnabled"
+    )) {
+        Set-ItemProperty -Path $CDMKey -Name $v -Value 0 -Type DWord -ErrorAction SilentlyContinue
+    }
+
+    # Widgets / News and Interests off (machine policy)
+    $DshKey = "HKLM:\SOFTWARE\Policies\Microsoft\Dsh"
+    If (!(Test-Path $DshKey)) { New-Item -Path $DshKey -Force | Out-Null }
+    Set-ItemProperty -Path $DshKey -Name "AllowNewsAndInterests" -Value 0 -Type DWord
+
+    Write-Host "  Done." -ForegroundColor Green
+    Record-Section "ConsumerExperiences" "APPLIED"
+} else { Write-Host "  Skipped." -ForegroundColor DarkGray; Record-Section "ConsumerExperiences" "SKIPPED" }
+
+
+# -----------------------------------------------------------------------------
+# SECTION 22: ADDITIONAL TELEMETRY AND TRACKING HARDENING
+#
+# INFO:
+#   Section 4 disables the core DiagTrack telemetry pipeline. This section
+#   closes the remaining tracking channels that DiagTrack does not cover:
+#   the Customer Experience Improvement Program (CEIP) scheduled tasks, the
+#   Application Compatibility Appraiser and Inventory collector (which scans
+#   installed software and sends an inventory to Microsoft), the Windows
+#   Feedback sampling that periodically prompts for and uploads feedback,
+#   and online speech / inking-and-typing data collection.
+# -----------------------------------------------------------------------------
+Write-Host "`n[22/22] Additional Telemetry and Tracking Hardening..." -ForegroundColor Yellow
+
+if (Should-Skip "ExtraTelemetry") {
+    Write-Host "  Already completed in previous run. Skipping." -ForegroundColor DarkGray
+    Record-Section "ExtraTelemetry" "RESUMED-SKIP"
+} elseif (Confirm-Section -SectionName "Additional Telemetry and Tracking Hardening" `
+    -Info "Beyond the main DiagTrack telemetry service (Section 4), Windows still collects data through other channels: CEIP scheduled tasks, the Application Compatibility Appraiser and Inventory collector (which inventories your installed software and sends it to Microsoft), Windows Feedback sampling, and online speech recognition plus inking/typing data collection. These run independently of the telemetry level setting." `
+    -Benefits "Disables CEIP and Application Experience scheduled tasks, turns off the compatibility Appraiser/Inventory collector via policy, sets feedback frequency to zero so the OS stops prompting and uploading feedback, and disables online speech recognition and inking/typing data sharing. Closes the residual tracking channels left open after Section 4 for a quieter, lower-egress office build." `
+    -Considerations "Disabling the Application Compatibility Appraiser means Microsoft will not receive app-compatibility data; this has no day-to-day impact but is occasionally used to flag known-incompatible apps before a feature update. Online speech recognition (dictation via Microsoft's cloud) is disabled; locally-processed speech still works where supported. All changes are machine/user policy and are captured for rollback where they are HKLM policy keys.") {
+
+    # Disable telemetry / CEIP / feedback scheduled tasks
+    $TelemetryTasks = @(
+        "\Microsoft\Windows\Application Experience\Microsoft Compatibility Appraiser",
+        "\Microsoft\Windows\Application Experience\ProgramDataUpdater",
+        "\Microsoft\Windows\Application Experience\StartupAppTask",
+        "\Microsoft\Windows\Customer Experience Improvement Program\Consolidator",
+        "\Microsoft\Windows\Customer Experience Improvement Program\UsbCeip",
+        "\Microsoft\Windows\Customer Experience Improvement Program\KernelCeipTask",
+        "\Microsoft\Windows\Autochk\Proxy",
+        "\Microsoft\Windows\Feedback\Siuf\DmClient",
+        "\Microsoft\Windows\Feedback\Siuf\DmClientOnScenarioDownload",
+        "\Microsoft\Windows\DiskDiagnostic\Microsoft-Windows-DiskDiagnosticDataCollector"
+    )
+    foreach ($TaskPath in $TelemetryTasks) {
+        $Leaf   = Split-Path $TaskPath -Leaf
+        $Folder = (Split-Path $TaskPath -Parent) + "\"
+        $t = Get-ScheduledTask -TaskName $Leaf -TaskPath $Folder -ErrorAction SilentlyContinue
+        if ($t) {
+            Disable-ScheduledTask -TaskName $Leaf -TaskPath $Folder -ErrorAction SilentlyContinue | Out-Null
+            Write-Host "  Disabled task: $Leaf" -ForegroundColor Green
+        }
+    }
+
+    # Application Compatibility Appraiser / Inventory collector off (machine policy)
+    $AppCompatKey = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppCompat"
+    If (!(Test-Path $AppCompatKey)) { New-Item -Path $AppCompatKey -Force | Out-Null }
+    Set-ItemProperty -Path $AppCompatKey -Name "AITEnable" -Value 0 -Type DWord
+    Set-ItemProperty -Path $AppCompatKey -Name "DisableInventory" -Value 1 -Type DWord
+    Set-ItemProperty -Path $AppCompatKey -Name "DisableUAR" -Value 1 -Type DWord
+
+    # Windows Feedback frequency to zero (per-user)
+    $SiufKey = "HKCU:\Software\Microsoft\Siuf\Rules"
+    If (!(Test-Path $SiufKey)) { New-Item -Path $SiufKey -Force | Out-Null }
+    Set-ItemProperty -Path $SiufKey -Name "NumberOfSIUFInPeriod" -Value 0 -Type DWord -ErrorAction SilentlyContinue
+    Remove-ItemProperty -Path $SiufKey -Name "PeriodInNanoSeconds" -ErrorAction SilentlyContinue
+
+    # Online speech recognition off (machine policy + per-user consent)
+    $SpeechPolicyKey = "HKLM:\SOFTWARE\Policies\Microsoft\Speech"
+    If (!(Test-Path $SpeechPolicyKey)) { New-Item -Path $SpeechPolicyKey -Force | Out-Null }
+    Set-ItemProperty -Path $SpeechPolicyKey -Name "AllowSpeechModelUpdate" -Value 0 -Type DWord -ErrorAction SilentlyContinue
+    $SpeechConsentKey = "HKCU:\Software\Microsoft\Speech_OneCore\Settings\OnlineSpeechPrivacy"
+    If (!(Test-Path $SpeechConsentKey)) { New-Item -Path $SpeechConsentKey -Force | Out-Null }
+    Set-ItemProperty -Path $SpeechConsentKey -Name "HasAccepted" -Value 0 -Type DWord -ErrorAction SilentlyContinue
+
+    # Inking and typing personalisation / data sharing off (per-user)
+    $TipcKey = "HKCU:\Software\Microsoft\Input\TIPC"
+    If (!(Test-Path $TipcKey)) { New-Item -Path $TipcKey -Force | Out-Null }
+    Set-ItemProperty -Path $TipcKey -Name "Enabled" -Value 0 -Type DWord -ErrorAction SilentlyContinue
+    $PersonalizationKey = "HKCU:\Software\Microsoft\Personalization\Settings"
+    If (!(Test-Path $PersonalizationKey)) { New-Item -Path $PersonalizationKey -Force | Out-Null }
+    Set-ItemProperty -Path $PersonalizationKey -Name "AcceptedPrivacyPolicy" -Value 0 -Type DWord -ErrorAction SilentlyContinue
+
+    Write-Host "  Done." -ForegroundColor Green
+    Record-Section "ExtraTelemetry" "APPLIED"
+} else { Write-Host "  Skipped." -ForegroundColor DarkGray; Record-Section "ExtraTelemetry" "SKIPPED" }
 
 
 } finally {
@@ -1139,6 +1389,26 @@ else { Write-Host "  OK: NetBIOS disabled on all adapters" -ForegroundColor Gree
 $Telemetry = (Get-ItemProperty "HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection" -Name "AllowTelemetry" -ErrorAction SilentlyContinue).AllowTelemetry
 if ($Telemetry -ne 0) { $VerifyFailed += "FAIL: AllowTelemetry should be 0 but is $Telemetry" }
 else { Write-Host "  OK: Telemetry disabled" -ForegroundColor Green }
+
+$Cortana = (Get-ItemProperty "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search" -Name "AllowCortana" -ErrorAction SilentlyContinue).AllowCortana
+if ($Cortana -ne 0) { $VerifyFailed += "FAIL: AllowCortana should be 0 but is $Cortana" }
+else { Write-Host "  OK: Cortana disabled" -ForegroundColor Green }
+
+$SecQ = (Get-ItemProperty "HKLM:\SOFTWARE\Policies\Microsoft\Windows\System" -Name "NoLocalPasswordResetQuestions" -ErrorAction SilentlyContinue).NoLocalPasswordResetQuestions
+if ($SecQ -ne 1) { $VerifyFailed += "FAIL: NoLocalPasswordResetQuestions should be 1 but is $SecQ" }
+else { Write-Host "  OK: Local account security questions disabled" -ForegroundColor Green }
+
+$ConsumerFeatures = (Get-ItemProperty "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent" -Name "DisableWindowsConsumerFeatures" -ErrorAction SilentlyContinue).DisableWindowsConsumerFeatures
+if ($ConsumerFeatures -ne 1) { $VerifyFailed += "FAIL: DisableWindowsConsumerFeatures should be 1 but is $ConsumerFeatures" }
+else { Write-Host "  OK: Consumer features/ads disabled" -ForegroundColor Green }
+
+$AppCompatInv = (Get-ItemProperty "HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppCompat" -Name "DisableInventory" -ErrorAction SilentlyContinue).DisableInventory
+if ($AppCompatInv -ne 1) { $VerifyFailed += "FAIL: AppCompat DisableInventory should be 1 but is $AppCompatInv" }
+else { Write-Host "  OK: App compatibility inventory/telemetry disabled" -ForegroundColor Green }
+
+$RemainingBloat = Get-AppxPackage -Name "Microsoft.XboxGamingOverlay" -ErrorAction SilentlyContinue
+if ($RemainingBloat) { $VerifyFailed += "REVIEW: Xbox Gaming Overlay still present for current user. Bloatware section may have been skipped." }
+else { Write-Host "  OK: Xbox bloatware removed for current user" -ForegroundColor Green }
 
 if (Test-Path "C:\hiberfil.sys") { $VerifyFailed += "FAIL: hiberfil.sys still exists. Reboot may be required." }
 else { Write-Host "  OK: Hibernation disabled" -ForegroundColor Green }
@@ -1201,6 +1471,11 @@ $RegistryExports = @{
     "LLMNR"                = "HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient"
     "LocationTracking"     = "HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\Windows\LocationAndSensors"
     "DoH"                  = "HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\Dnscache\Parameters"
+    "WindowsSearchPolicy"  = "HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\Windows\Windows Search"
+    "CloudContent"         = "HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\Windows\CloudContent"
+    "AdvertisingInfo"      = "HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\Windows\AdvertisingInfo"
+    "Widgets"              = "HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\Dsh"
+    "AppCompat"            = "HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\Windows\AppCompat"
 }
 
 foreach ($Name in $RegistryExports.Keys) {
@@ -1256,6 +1531,11 @@ HARDENING APPLIED
 15. OneDrive, VMware, and YubiKey service dependencies protected
 16. Audit policy baseline applied (Logon, Privilege Use, Policy Change, Account Management)
 17. DNS over HTTPS configured system-wide (Cloudflare 1.1.1.1)
+18. Cortana disabled. Start menu web/Bing search disabled
+19. Local account security questions disabled (offline reset backdoor removed)
+20. Consumer bloatware removed and deprovisioned (Xbox, LinkedIn, Bing, Solitaire, etc.)
+21. Consumer features/ads, suggested content, advertising ID, tailored experiences, Widgets disabled
+22. Additional telemetry hardened (CEIP tasks, App Compat inventory, feedback, online speech/typing)
 
 RESTORE PROCEDURE ON REBUILD
 1. Copy Harden-Windows-Portable-Documented.ps1 to the machine
@@ -1328,6 +1608,11 @@ $RegistryExports = @{
     "LLMNR"                = "HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient"
     "LocationTracking"     = "HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\Windows\LocationAndSensors"
     "DoH"                  = "HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\Dnscache\Parameters"
+    "WindowsSearchPolicy"  = "HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\Windows\Windows Search"
+    "CloudContent"         = "HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\Windows\CloudContent"
+    "AdvertisingInfo"      = "HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\Windows\AdvertisingInfo"
+    "Widgets"              = "HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\Dsh"
+    "AppCompat"            = "HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\Windows\AppCompat"
 }
 
 foreach ($Name in $RegistryExports.Keys) {
