@@ -22,17 +22,17 @@ It has two modes. Auto, or interactive. Auto will run through everything at the 
 
 ## Features
 
-- **Fully portable** — no hardcoded usernames, paths, or machine names. Works on any Windows machine.
-- **Interactive or Automatic mode** — step through each section with full documentation, or apply everything unattended.
-- **Pre-change backup** — captures registry state, Group Policy report, security policy, and service states before making any change. Stored in a dated subfolder and copied to `PRE-CHANGE-LATEST` for quick access.
-- **Rollback capability** — if a previous run's pre-change backup exists, the script offers to restore the machine to its pre-hardening state before proceeding.
-- **Interruption protection** — Windows Update service is suspended during the run to prevent forced reboots mid-session. A progress log is written after each section. If interrupted, the next run detects the incomplete log and offers to resume from the last completed section.
-- **Post-hardening verification** — independently checks every key control after applying changes and flags any drift.
-- **Debloating** — removes and deprovisions consumer Store apps (Xbox, LinkedIn, Bing News/Weather, Solitaire, Clipchamp, Skype, Phone Link, consumer Teams Chat, and more) plus disables Cortana, in-OS ads, suggested content, the advertising ID, and Widgets. Work apps (Microsoft 365, Teams for work, Company Portal) are left untouched.
-- **Windows Update integration** — installs OS patches via PSWindowsUpdate and upgrades all third-party applications via winget immediately after hardening.
-- **Weekly scheduled tasks** — registers `WindowsAdminBackup` (Sunday 08:00) and `WeeklyWingetUpgrade` (Sunday 09:00) with `StartWhenAvailable` so missed runs catch up on next startup. The backup script is self-contained and written to disk automatically — no separate file required.
-- **Colour-coded summary table** — every section, its status, and all verification results displayed clearly at the end.
-- **Free space wipe (disk-aware)** — optional `cipher /w:C` at the end to overwrite deleted file remnants. The script auto-detects the C: disk type and recommends against the wipe on SSDs (defaulting the prompt to skip), while offering it as a sensible option on HDDs.
+- **Fully portable** - no hardcoded usernames, paths, or machine names. Works on any Windows machine.
+- **Interactive or Automatic mode** - step through each section with full documentation, or apply everything unattended.
+- **Pre-change backup** - captures registry state, Group Policy report, security policy, and service states before making any change. Stored in a dated subfolder and copied to `PRE-CHANGE-LATEST` for quick access.
+- **Rollback capability** - if a previous run's pre-change backup exists, the script offers to restore the machine to its pre-hardening state before proceeding.
+- **Interruption protection** - Windows Update service is suspended during the run to prevent forced reboots mid-session. A progress log is written after each section. If interrupted, the next run detects the incomplete log and offers to resume from the last completed section.
+- **Post-hardening verification** - independently checks every key control after applying changes and flags any drift.
+- **Debloating** - removes and deprovisions consumer Store apps (Xbox, LinkedIn, Bing News/Weather, Solitaire, Clipchamp, Skype, Phone Link, consumer Teams Chat, and more) plus disables Cortana, in-OS ads, suggested content, the advertising ID, and Widgets. Work apps (Microsoft 365, Teams for work, Company Portal) are left untouched.
+- **Windows Update integration** - installs OS patches via PSWindowsUpdate and upgrades all third-party applications via winget immediately after hardening.
+- **Weekly scheduled tasks** - registers `WindowsAdminBackup` (Sunday 08:00) and `WeeklyWingetUpgrade` (Sunday 09:00) with `StartWhenAvailable` so missed runs catch up on next startup. The backup script is self-contained and written to disk automatically - no separate file required.
+- **Colour-coded summary table** - every section, its status, and all verification results displayed clearly at the end.
+- **Free space wipe (disk-aware)** - optional `cipher /w:C` at the end to overwrite deleted file remnants. The script auto-detects the C: disk type and recommends against the wipe on SSDs (defaulting the prompt to skip), while offering it as a sensible option on HDDs.
 
 ---
 
@@ -74,10 +74,10 @@ Set-ExecutionPolicy RemoteSigned -Scope CurrentUser
 
 The script runs in five phases plus a final step.
 
-### Phase 0 — Detect
+### Phase 0 - Detect
 Auto-detects the admin username, profile path, machine name, and OneDrive path from environment variables. Creates the Maintenance-Stuff folder if it does not exist. Captures a full pre-change backup. Checks for an incomplete previous run and offers to resume.
 
-### Phase 1 — Apply (22 sections)
+### Phase 1 - Apply (22 sections)
 
 | Section | What it does |
 |---|---|
@@ -104,20 +104,20 @@ Auto-detects the admin username, profile path, machine name, and OneDrive path f
 | 21. Consumer Experiences and Ads | Disables auto-installed promoted apps, suggested content, lock-screen Spotlight ads, advertising ID, tailored experiences, and the Widgets/News feed. |
 | 22. Additional Telemetry Hardening | Disables CEIP and Application Experience scheduled tasks, App Compat Appraiser/Inventory, feedback sampling, and online speech/inking-and-typing data collection. |
 
-### Phase 2 — Verify
+### Phase 2 - Verify
 Independently checks all key controls and flags any that did not apply correctly. Checks include service startup types, registry values, BitLocker status, and scheduled task inventory.
 
-### Phase 3 — Backup
+### Phase 3 - Backup
 Exports post-hardening registry keys, Group Policy report, security policy, and services state CSV. Writes a README with verification results and restore procedure.
 
-### Phase 4 — Tasks
+### Phase 4 - Tasks
 Registers `WindowsAdminBackup` (Sunday 08:00) and `WeeklyWingetUpgrade` (Sunday 09:00). Both run as SYSTEM with `StartWhenAvailable`. The backup script is written directly to Maintenance-Stuff so no prerequisite files are needed.
 
-### Phase 5 — Update
+### Phase 5 - Update
 Installs PSWindowsUpdate module if not present. Applies all pending Windows OS and driver patches. Runs `winget upgrade --all` for third-party applications.
 
-### Final — Cipher Wipe
-Auto-detects the C: disk type via WMI. On an **SSD** it recommends against the wipe and defaults the prompt to skip (wear-leveling and TRIM make the overwrite unreliable and it adds needless write wear — rely on BitLocker, or a vendor secure-erase for disposal). On an **HDD** it offers `cipher /w:C` to overwrite deleted file remnants. Can be deferred and run manually.
+### Final - Cipher Wipe
+Auto-detects the C: disk type via WMI. On an **SSD** it recommends against the wipe and defaults the prompt to skip (wear-leveling and TRIM make the overwrite unreliable and it adds needless write wear - rely on BitLocker, or a vendor secure-erase for disposal). On an **HDD** it offers `cipher /w:C` to overwrite deleted file remnants. Can be deferred and run manually.
 
 ---
 
@@ -166,11 +166,11 @@ Note: file deletions (thumbnail cache, prefetch, WER dumps) and removed Store ap
 
 The following are deliberately omitted from this script because they would break legitimate software or require manual configuration specific to each machine:
 
-- **BitLocker** — must be enabled manually via Settings > Privacy & Security > Device Encryption
-- **Windows Firewall rules** — network-specific and not portable
-- **User Account Control level** — left at system default
-- **Microsoft Defender settings** — left at system default
-- **Browser hardening** — browser-specific and not portable
+- **BitLocker** - must be enabled manually via Settings > Privacy & Security > Device Encryption
+- **Windows Firewall rules** - network-specific and not portable
+- **User Account Control level** - left at system default
+- **Microsoft Defender settings** - left at system default
+- **Browser hardening** - browser-specific and not portable
 
 ---
 
