@@ -8,7 +8,7 @@ A portable, fully documented Windows hardening script that works on any Windows 
 
 I created this because I got fed up of manually setting up my own and friends/family local accounts
 
-Run this script as Administrator on any Windows machine. It will auto-detect the admin account, machine name, and OneDrive path. It takes a pre-change backup before touching anything, applies 17 hardening sections, verifies the result, installs Windows and application updates, registers two weekly maintenance tasks, and produces a colour-coded summary at the end. 
+Run this script as Administrator on any Windows machine. It will auto-detect the admin account, machine name, and OneDrive path. It takes a pre-change backup before touching anything, applies 22 hardening sections, verifies the result, installs Windows and application updates, registers two weekly maintenance tasks, and produces a colour-coded summary at the end. 
 
 It has two modes. Auto, or interactive. Auto will run through everything at the click of a couple of buttonns, where as interactive mode lets you step through each change and approve or skip it individually.
 
@@ -76,7 +76,7 @@ The script runs in five phases plus a final step.
 ### Phase 0 — Detect
 Auto-detects the admin username, profile path, machine name, and OneDrive path from environment variables. Creates the Maintenance-Stuff folder if it does not exist. Captures a full pre-change backup. Checks for an incomplete previous run and offers to resume.
 
-### Phase 1 — Apply (17 sections)
+### Phase 1 — Apply (22 sections)
 
 | Section | What it does |
 |---|---|
@@ -97,6 +97,11 @@ Auto-detects the admin username, profile path, machine name, and OneDrive path f
 | 15. Service Dependencies | Protects OneDrive sync services, VMware, and YubiKey smart card services from being accidentally disabled. |
 | 16. Audit Policy Baseline | Enables logon/logoff, account lockout, privilege use, policy change, and account management auditing. |
 | 17. DNS over HTTPS | Configures system-wide DoH via Cloudflare 1.1.1.1 at the OS registry level. |
+| 18. Cortana and Web Search | Disables Cortana via policy. Turns off Bing/web results and connected search in the Start menu. |
+| 19. Local Account Security Questions | Sets NoLocalPasswordResetQuestions=1, removing the offline password-reset backdoor for local accounts. |
+| 20. Consumer Bloatware Removal | Removes and deprovisions Xbox suite, LinkedIn, Bing News/Weather, Solitaire, Clipchamp, Groove/Movies, 3D apps, Skype, Maps, Phone Link, consumer Teams Chat, Get Help, Tips, Feedback Hub, Mixed Reality, People. |
+| 21. Consumer Experiences and Ads | Disables auto-installed promoted apps, suggested content, lock-screen Spotlight ads, advertising ID, tailored experiences, and the Widgets/News feed. |
+| 22. Additional Telemetry Hardening | Disables CEIP and Application Experience scheduled tasks, App Compat Appraiser/Inventory, feedback sampling, and online speech/inking-and-typing data collection. |
 
 ### Phase 2 — Verify
 Independently checks all key controls and flags any that did not apply correctly. Checks include service startup types, registry values, BitLocker status, and scheduled task inventory.
