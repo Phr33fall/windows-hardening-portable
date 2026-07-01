@@ -89,7 +89,7 @@ Auto-detects the admin username, profile path, machine name, and OneDrive path f
 | 6. Prefetch and Superfetch | Disables EnablePrefetcher and EnableSuperfetch. Stops SysMain. Clears Prefetch folder. |
 | 7. Recent Files and Jump Lists | Disables Start_TrackDocs. Clears Recent, AutomaticDestinations, CustomDestinations. Removes common orphaned Run keys. |
 | 8. Location Tracking | Disables DisableLocation via policy. Clears LocationHistory folder. |
-| 9. Delivery Optimisation | Sets DODownloadMode to 0. Disables DoSvc via registry. Clears DO cache. |
+| 9. Delivery Optimisation | Sets DODownloadMode to 0 (HTTP-only, no peer-to-peer). Leaves DoSvc running since Windows Update depends on it for downloads. Clears DO cache. |
 | 10. Activity History and CDP | Disables activity feed policy keys. Stops CDPSvc. Disables CDPSvc via registry. Deletes ConnectedDevicesPlatform folder. |
 | 11. Windows Ink and Handwriting | Disables AllowWindowsInkWorkspace. Clears InputPersonalization data. |
 | 12. Network Hardening | Disables LLMNR via EnableMulticast=0. Disables NetBIOS on all adapters via WMI SetTcpipNetbios(2). |

@@ -779,13 +779,12 @@ if (Should-Skip "DeliveryOptimisation") {
     Record-Section "DeliveryOptimisation" "RESUMED-SKIP"
 } elseif (Confirm-Section -SectionName "Delivery Optimisation" `
     -Info "Windows Delivery Optimisation uses your machine's internet connection as a peer-to-peer relay to distribute Windows updates to other computers, both on your local network and across the internet. Enabled by default with no prominent notification. Can consume significant bandwidth and disk space." `
-    -Benefits "Disabling stops your machine acting as an upload relay for Microsoft's update distribution network. Prevents unexpected bandwidth consumption. Clears the local cache. Your machine still receives its own updates normally." `
-    -Considerations "DoSvc resists being disabled via Set-Service even as Administrator. The registry Start value is set directly to 4 (Disabled). A reboot is required for full effect. In enterprise environments this may conflict with WSUS or Intune-managed update policies.") {
+    -Benefits "Setting DODownloadMode to HTTP-only stops your machine acting as an upload relay for Microsoft's update distribution network and prevents unexpected bandwidth consumption. Clears the local cache. Your machine still receives its own updates normally via Windows Update." `
+    -Considerations "The DoSvc service itself is left running (Windows Update depends on it to download update payloads, not just for peer-to-peer sharing; force-disabling it via the registry can cause Windows Update downloads to fail or hang). Only the peer-to-peer download mode is turned off via policy. In enterprise environments this may conflict with WSUS or Intune-managed update policies.") {
 
     $DOKey = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\DeliveryOptimization"
     If (!(Test-Path $DOKey)) { New-Item -Path $DOKey -Force | Out-Null }
     Set-ItemProperty -Path $DOKey -Name "DODownloadMode" -Value 0 -Type DWord
-    Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\DoSvc" -Name "Start" -Value 4 -ErrorAction SilentlyContinue
     $DOCache = "C:\Windows\SoftwareDistribution\DeliveryOptimization"
     If (Test-Path $DOCache) {
         Get-ChildItem $DOCache -Recurse -ErrorAction SilentlyContinue | Remove-Item -Force -Recurse -ErrorAction SilentlyContinue
@@ -1367,10 +1366,10 @@ $CDPUserSvcStart = (Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Services\CD
 if ($CDPUserSvcStart -ne 4) { Write-Host "  NOTE: CDPUserSvc template not fully disabled - this is expected on some builds. Check CDPSvc registry instead." -ForegroundColor Yellow }
 else { Write-Host "  OK: CDPUserSvc Disabled (registry template)" -ForegroundColor Green }
 
-$DoSvcStart  = (Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Services\DoSvc"  -Name "Start" -ErrorAction SilentlyContinue).Start
+$DODownloadMode = (Get-ItemProperty "HKLM:\SOFTWARE\Policies\Microsoft\Windows\DeliveryOptimization" -Name "DODownloadMode" -ErrorAction SilentlyContinue).DODownloadMode
 $CDPSvcStart = (Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Services\CDPSvc" -Name "Start" -ErrorAction SilentlyContinue).Start
-if ($DoSvcStart  -ne 4) { $VerifyFailed += "FAIL: DoSvc registry Start should be 4 but is $DoSvcStart" }
-else { Write-Host "  OK: DoSvc Disabled (registry)" -ForegroundColor Green }
+if ($DODownloadMode -ne 0) { $VerifyFailed += "FAIL: DODownloadMode should be 0 but is $DODownloadMode" }
+else { Write-Host "  OK: Delivery Optimisation set to HTTP-only (DoSvc left running for Windows Update)" -ForegroundColor Green }
 if ($CDPSvcStart -ne 4) { $VerifyFailed += "FAIL: CDPSvc registry Start should be 4 but is $CDPSvcStart" }
 else { Write-Host "  OK: CDPSvc Disabled (registry)" -ForegroundColor Green }
 
@@ -1522,7 +1521,7 @@ HARDENING APPLIED
 6.  Prefetch and Superfetch disabled. SysMain service disabled
 7.  Recent files, Jump Lists, and orphaned run keys cleared
 8.  Location tracking disabled and history cleared
-9.  Delivery Optimisation disabled. DoSvc disabled via registry
+9.  Delivery Optimisation set to HTTP-only (DoSvc left running for Windows Update)
 10. Activity History disabled. CDPSvc disabled via registry. CDP folder deleted
 11. Windows Ink disabled. Handwriting data cleared
 12. LLMNR disabled via registry. NetBIOS disabled on all adapters
