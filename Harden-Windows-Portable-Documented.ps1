@@ -1,9 +1,10 @@
+#Requires -RunAsAdministrator
 # =============================================================================
 # Harden-Windows-Portable-Documented.ps1
 # Portable Windows Hardening Script - Fully Documented Edition
 # Auto-detects machine, admin account, and paths at runtime
-# Last updated: April 2026
-# Run as Administrator
+# Last updated: September 2026
+# Run as Administrator from Windows PowerShell 5.1 (not PowerShell 7)
 # =============================================================================
 #
 # PURPOSE
@@ -13,11 +14,21 @@
 #
 # HOW TO USE
 # 1. Copy this script to any Windows machine
-# 2. Open PowerShell as Administrator
+# 2. Open Windows PowerShell as Administrator (the built-in 5.1, not pwsh 7:
+#    the WMI and Appx cmdlets this script relies on behave differently there)
 # 3. Unblock-File .\Harden-Windows-Portable-Documented.ps1
 # 4. Set-ExecutionPolicy RemoteSigned -Scope CurrentUser
 # 5. .\Harden-Windows-Portable-Documented.ps1
 # 6. Review the detected context, select mode, and proceed
+#
+# PER-USER SETTINGS
+# Machine-wide policy keys (HKLM) apply to every account. Per-user settings
+# (the HKCU equivalents) are applied to every local user profile on the
+# machine and to the Default profile template, so accounts created later
+# inherit them. Profiles of users who are not signed in are loaded
+# temporarily from NTUSER.DAT and unloaded afterwards. Per-user file
+# clean-ups (thumbnail cache, Recent folder) run across all profiles too,
+# but files locked by a signed-in user are skipped silently.
 #
 # PHASES
 # Phase 0 - Detect:   machine context, rollback check, pre-change backup
@@ -82,7 +93,7 @@ if ($OneDrivePath -and (Test-Path $OneDrivePath)) {
     $ScriptBase = "C:\Maintenance-Stuff"
     $BackupRoot = "C:\Maintenance-Stuff"
     Write-Host "  OneDrive not found. Using local path: C:\Maintenance-Stuff" -ForegroundColor Yellow
-    $Warnings += "OneDrive not detected. Backup stored locally. Copy offsite manually."
+    $script:Warnings += "OneDrive not detected. Backup stored locally. Copy offsite manually."
 }
 
 $BackupPath   = "$BackupRoot\$Date"
@@ -142,6 +153,126 @@ function Should-Skip {
     return $CompletedSections -contains $SectionName
 }
 
+$SectionCount = 22
+
+# Runs one hardening section: resume check, interactive confirmation, the
+# action itself, and result recording. Sections only supply their
+# documentation strings and a scriptblock. Inside the scriptblock, append to
+# $script:Warnings (not $Warnings) so the value survives the scope boundary.
+function Invoke-Section {
+    param(
+        [int]$Number,
+        [string]$Key,
+        [string]$Title,
+        [string]$Info,
+        [string]$Benefits,
+        [string]$Considerations,
+        [scriptblock]$Action
+    )
+    Write-Host "`n[$Number/$SectionCount] $Title..." -ForegroundColor Yellow
+
+    if (Should-Skip $Key) {
+        Write-Host "  Already completed in previous run. Skipping." -ForegroundColor DarkGray
+        Record-Section $Key "RESUMED-SKIP"
+        return
+    }
+    if (-not (Confirm-Section -SectionName $Title -Info $Info -Benefits $Benefits -Considerations $Considerations)) {
+        Write-Host "  Skipped." -ForegroundColor DarkGray
+        Record-Section $Key "SKIPPED"
+        return
+    }
+    try {
+        & $Action | Out-Null
+        Write-Host "  Done." -ForegroundColor Green
+        Record-Section $Key "APPLIED"
+    } catch {
+        Write-Host "  FAILED: $($_.Exception.Message)" -ForegroundColor Red
+        $script:Warnings += "Section $Number ($Title) failed: $($_.Exception.Message)"
+        Record-Section $Key "FAILED"
+    }
+}
+
+# Every real user profile on the machine (SIDs starting S-1-5-21) plus the
+# Default template that new accounts are cloned from. Service and system
+# profiles are excluded.
+function Get-UserProfileHives {
+    $Result = @()
+    Get-ChildItem "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList" -ErrorAction SilentlyContinue |
+        Where-Object { $_.PSChildName -like "S-1-5-21-*" } | ForEach-Object {
+            $Sid  = $_.PSChildName
+            $Path = (Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue).ProfileImagePath
+            if ($Path) { $Path = [Environment]::ExpandEnvironmentVariables($Path) }
+            if ($Path -and (Test-Path "$Path\NTUSER.DAT")) {
+                $Result += [PSCustomObject]@{
+                    Sid         = $Sid
+                    Name        = Split-Path $Path -Leaf
+                    ProfilePath = $Path
+                    HiveFile    = "$Path\NTUSER.DAT"
+                    Loaded      = (Test-Path "Registry::HKEY_USERS\$Sid")
+                }
+            }
+        }
+    $DefaultProfile = "$env:SystemDrive\Users\Default"
+    if (Test-Path "$DefaultProfile\NTUSER.DAT") {
+        $Result += [PSCustomObject]@{
+            Sid         = "DefaultUserTemplate"
+            Name        = "Default (template for new accounts)"
+            ProfilePath = $DefaultProfile
+            HiveFile    = "$DefaultProfile\NTUSER.DAT"
+            Loaded      = (Test-Path "Registry::HKEY_USERS\DefaultUserTemplate")
+        }
+    }
+    return $Result
+}
+
+# Runs $Action once per user profile. The scriptblock receives two arguments:
+#   $Root  - registry path prefix equivalent to that user's HKCU,
+#            e.g. Registry::HKEY_USERS\S-1-5-21-...
+#   $Hive  - the profile object from Get-UserProfileHives (Sid, Name, ProfilePath)
+# Hives of users who are not signed in are loaded under HKEY_USERS\<SID> for
+# the duration of the action and unloaded afterwards, so paths are the same
+# whether or not the user is signed in.
+function Invoke-ForEachUserHive {
+    param([scriptblock]$Action)
+    foreach ($Hive in Get-UserProfileHives) {
+        $Root = "Registry::HKEY_USERS\$($Hive.Sid)"
+        $LoadedHere = $false
+        if (-not $Hive.Loaded) {
+            reg load "HKU\$($Hive.Sid)" $Hive.HiveFile 2>&1 | Out-Null
+            if ($LASTEXITCODE -ne 0) {
+                $script:Warnings += "Could not load the registry hive for profile '$($Hive.Name)'. Per-user settings were not applied to it."
+                continue
+            }
+            $LoadedHere = $true
+        }
+        try {
+            & $Action $Root $Hive
+        } catch {
+            $script:Warnings += "Per-user setting failed for profile '$($Hive.Name)': $($_.Exception.Message)"
+        } finally {
+            if ($LoadedHere) {
+                [gc]::Collect(); [gc]::WaitForPendingFinalizers()
+                reg unload "HKU\$($Hive.Sid)" 2>&1 | Out-Null
+                if ($LASTEXITCODE -ne 0) {
+                    $script:Warnings += "Registry hive for profile '$($Hive.Name)' could not be unloaded. Reboot before that user signs in."
+                }
+            }
+        }
+    }
+}
+
+# Removes any files matching $Pattern under each user profile (and the Default
+# template). Files locked by a signed-in user are skipped silently.
+function Clear-PerProfileFiles {
+    param([string]$RelativeFolder, [string]$Pattern = "*")
+    foreach ($Hive in Get-UserProfileHives) {
+        $Folder = Join-Path $Hive.ProfilePath $RelativeFolder
+        if (Test-Path $Folder) {
+            Get-ChildItem (Join-Path $Folder $Pattern) -File -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 Write-Host "`n  Machine:      $MachineName" -ForegroundColor Gray
 Write-Host "  Admin user:   $AdminUser" -ForegroundColor Gray
 Write-Host "  Admin SID:    $AdminSID" -ForegroundColor Gray
@@ -167,31 +298,96 @@ Write-Host "  Local users:  $($LocalUsers -join ', ')" -ForegroundColor Gray
 #   registry paths. One prompt, one answer, full rollback.
 #
 # CONSIDERATIONS APPLYING:
-#   Rollback only restores the items captured in the pre-change backup: registry
-#   keys, security policy, and service startup types. It does not undo file
-#   deletions (thumbnail cache, prefetch, WER dumps etc) as those are gone.
-#   It also does not remove scheduled tasks registered during hardening.
+#   Rollback restores what the pre-change backup captured: machine and per-user
+#   registry keys (removing only keys and values hardening created), security
+#   policy, audit policy subcategories, service startup types, hibernation,
+#   the active power plan, NetBIOS per adapter, the telemetry scheduled tasks
+#   disabled by Section 22, DNS servers and DoH registrations. It does not
+#   undo file deletions (thumbnail cache, prefetch, WER dumps, activity
+#   history) as those are gone, cannot reinstall removed Store apps, does not
+#   recreate the OEM/CCleaner tasks removed by Section 14, and does not
+#   remove the two weekly maintenance tasks this script registers.
 #   After rollback the script exits. Re-run to apply fresh hardening.
 # =============================================================================
 $PreCopyDest = "$ScriptBase\PRE-CHANGE-LATEST"
+
+# Machine-wide keys touched by hardening. Exported before changes and restored
+# on rollback. Values lists drive the "remove what hardening created" step.
 $RegistryRollbackTargets = @(
     [PSCustomObject]@{ Name = "Telemetry";            RegPath = "HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\Windows\DataCollection";                                   PsPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection";                                   Values = @("AllowTelemetry") },
     [PSCustomObject]@{ Name = "PrefetchParameters";   RegPath = "HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management\PrefetchParameters"; PsPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management\PrefetchParameters"; Values = @("EnablePrefetcher","EnableSuperfetch") },
+    [PSCustomObject]@{ Name = "FastStartup";          RegPath = "HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Session Manager\Power";                               PsPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power";                               Values = @("HiberbootEnabled") },
     [PSCustomObject]@{ Name = "ActivityHistory";      RegPath = "HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\Windows\System";                                           PsPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\System";                                           Values = @("EnableActivityFeed","PublishUserActivities","UploadUserActivities","NoLocalPasswordResetQuestions") },
     [PSCustomObject]@{ Name = "DeliveryOptimisation"; RegPath = "HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\Windows\DeliveryOptimization";                            PsPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\DeliveryOptimization";                            Values = @("DODownloadMode") },
     [PSCustomObject]@{ Name = "WindowsInk";           RegPath = "HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\WindowsInkWorkspace";                                      PsPath = "HKLM:\SOFTWARE\Policies\Microsoft\WindowsInkWorkspace";                                      Values = @("AllowWindowsInkWorkspace") },
     [PSCustomObject]@{ Name = "ErrorReporting";       RegPath = "HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\Windows\Windows Error Reporting";                         PsPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Error Reporting";                         Values = @("Disabled") },
-    [PSCustomObject]@{ Name = "LLMNR";                RegPath = "HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient";                                    PsPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient";                                    Values = @("EnableMulticast") },
+    [PSCustomObject]@{ Name = "DNSClientPolicy";      RegPath = "HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient";                                    PsPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient";                                    Values = @("EnableMulticast","DoHPolicy") },
     [PSCustomObject]@{ Name = "LocationTracking";     RegPath = "HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\Windows\LocationAndSensors";                              PsPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\LocationAndSensors";                              Values = @("DisableLocation") },
-    [PSCustomObject]@{ Name = "AuditPolicy";          RegPath = "HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\EventLog";                                           PsPath = "HKLM:\SYSTEM\CurrentControlSet\Services\EventLog";                                           Values = @() },
-    [PSCustomObject]@{ Name = "DoH";                  RegPath = "HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\Dnscache\Parameters";                               PsPath = "HKLM:\SYSTEM\CurrentControlSet\Services\Dnscache\Parameters";                               Values = @("EnableAutoDoh") },
-    [PSCustomObject]@{ Name = "CloudflareDoH";        RegPath = "HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\Dnscache\Parameters\DohWellKnownServers\1.1.1.1";    PsPath = "HKLM:\SYSTEM\CurrentControlSet\Services\Dnscache\Parameters\DohWellKnownServers\1.1.1.1";    Values = @("DohFlags","Template") },
+    [PSCustomObject]@{ Name = "ExplorerPolicy";       RegPath = "HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\Windows\Explorer";                                        PsPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Explorer";                                        Values = @("DisableThumbnails") },
+    [PSCustomObject]@{ Name = "MachineRun";           RegPath = "HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Run";                                       PsPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run";                                       Values = @() },
     [PSCustomObject]@{ Name = "WindowsSearchPolicy";  RegPath = "HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\Windows\Windows Search";                                  PsPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search";                                  Values = @("AllowCortana","DisableWebSearch","ConnectedSearchUseWeb","AllowSearchToUseLocation") },
     [PSCustomObject]@{ Name = "CloudContent";         RegPath = "HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\Windows\CloudContent";                                    PsPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent";                                    Values = @("DisableWindowsConsumerFeatures","DisableConsumerAccountStateContent","DisableSoftLanding","DisableWindowsSpotlightFeatures") },
     [PSCustomObject]@{ Name = "AdvertisingInfo";      RegPath = "HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\Windows\AdvertisingInfo";                                 PsPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\AdvertisingInfo";                                 Values = @("DisabledByGroupPolicy") },
     [PSCustomObject]@{ Name = "Widgets";              RegPath = "HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\Dsh";                                                     PsPath = "HKLM:\SOFTWARE\Policies\Microsoft\Dsh";                                                     Values = @("AllowNewsAndInterests") },
-    [PSCustomObject]@{ Name = "AppCompat";            RegPath = "HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\Windows\AppCompat";                                       PsPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppCompat";                                       Values = @("AITEnable","DisableInventory","DisableUAR") }
+    [PSCustomObject]@{ Name = "AppCompat";            RegPath = "HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\Windows\AppCompat";                                       PsPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppCompat";                                       Values = @("AITEnable","DisableInventory","DisableUAR") },
+    [PSCustomObject]@{ Name = "SpeechPolicy";         RegPath = "HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\Speech";                                                  PsPath = "HKLM:\SOFTWARE\Policies\Microsoft\Speech";                                                  Values = @("AllowSpeechModelUpdate") }
 )
+
+# Per-user keys touched by hardening, relative to each user's hive root.
+# Backed up and restored for every profile via Invoke-ForEachUserHive.
+$UserRegistryRollbackTargets = @(
+    [PSCustomObject]@{ Name = "UserExplorerAdvanced"; SubPath = "Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced";     Values = @("Start_TrackDocs") },
+    [PSCustomObject]@{ Name = "UserRecentDocs";       SubPath = "Software\Microsoft\Windows\CurrentVersion\Explorer\RecentDocs";   Values = @() },
+    [PSCustomObject]@{ Name = "UserRun";              SubPath = "Software\Microsoft\Windows\CurrentVersion\Run";                   Values = @() },
+    [PSCustomObject]@{ Name = "UserSearch";           SubPath = "Software\Microsoft\Windows\CurrentVersion\Search";                Values = @("BingSearchEnabled","CortanaConsent") },
+    [PSCustomObject]@{ Name = "UserAdvertisingInfo";  SubPath = "Software\Microsoft\Windows\CurrentVersion\AdvertisingInfo";       Values = @("Enabled") },
+    [PSCustomObject]@{ Name = "UserPrivacy";          SubPath = "Software\Microsoft\Windows\CurrentVersion\Privacy";               Values = @("TailoredExperiencesWithDiagnosticDataEnabled") },
+    [PSCustomObject]@{ Name = "UserContentDelivery";  SubPath = "Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager"; Values = @("SilentInstalledAppsEnabled","SystemPaneSuggestionsEnabled","SoftLandingEnabled","RotatingLockScreenEnabled","RotatingLockScreenOverlayEnabled","SubscribedContentEnabled","SubscribedContent-338387Enabled","SubscribedContent-338388Enabled","SubscribedContent-338389Enabled","SubscribedContent-338393Enabled","SubscribedContent-353694Enabled","SubscribedContent-353696Enabled","SubscribedContent-310093Enabled","OemPreInstalledAppsEnabled","PreInstalledAppsEnabled") },
+    [PSCustomObject]@{ Name = "UserSiuf";             SubPath = "Software\Microsoft\Siuf\Rules";                                   Values = @("NumberOfSIUFInPeriod","PeriodInNanoSeconds") },
+    [PSCustomObject]@{ Name = "UserSpeechConsent";    SubPath = "Software\Microsoft\Speech_OneCore\Settings\OnlineSpeechPrivacy";  Values = @("HasAccepted") },
+    [PSCustomObject]@{ Name = "UserTIPC";             SubPath = "Software\Microsoft\Input\TIPC";                                   Values = @("Enabled") },
+    [PSCustomObject]@{ Name = "UserPersonalization";  SubPath = "Software\Microsoft\Personalization\Settings";                     Values = @("AcceptedPrivacyPolicy") }
+)
+
+# Scheduled tasks disabled by Section 22. Their pre-run state is captured so
+# rollback can re-enable the ones that were enabled.
+$TelemetryTaskPaths = @(
+    "\Microsoft\Windows\Application Experience\Microsoft Compatibility Appraiser",
+    "\Microsoft\Windows\Application Experience\ProgramDataUpdater",
+    "\Microsoft\Windows\Application Experience\StartupAppTask",
+    "\Microsoft\Windows\Customer Experience Improvement Program\Consolidator",
+    "\Microsoft\Windows\Customer Experience Improvement Program\UsbCeip",
+    "\Microsoft\Windows\Customer Experience Improvement Program\KernelCeipTask",
+    "\Microsoft\Windows\Autochk\Proxy",
+    "\Microsoft\Windows\Feedback\Siuf\DmClient",
+    "\Microsoft\Windows\Feedback\Siuf\DmClientOnScenarioDownload",
+    "\Microsoft\Windows\DiskDiagnostic\Microsoft-Windows-DiskDiagnosticDataCollector"
+)
+
+# Registry rollback for one hive root: import the exported .reg files, then
+# remove keys and values that did not exist before hardening.
+function Restore-RegistryFromSnapshot {
+    param([object[]]$Rows, [string]$RegFilePattern)
+    Get-ChildItem $RegFilePattern -ErrorAction SilentlyContinue | ForEach-Object {
+        reg import $_.FullName 2>$null
+        Write-Host "  Restored: $($_.Name)" -ForegroundColor Green
+    }
+    foreach ($KeyGroup in ($Rows | Group-Object PsPath)) {
+        $GroupRows = @($KeyGroup.Group)
+        $PsPath = $GroupRows[0].PsPath
+        $KeyExisted = [System.Convert]::ToBoolean($GroupRows[0].KeyExisted)
+        if (-not $KeyExisted) {
+            Remove-Item -Path $PsPath -Recurse -Force -ErrorAction SilentlyContinue
+            Write-Host "  Removed key created by hardening: $PsPath" -ForegroundColor Green
+            continue
+        }
+        foreach ($Row in $GroupRows | Where-Object { $_.ValueName }) {
+            if (-not [System.Convert]::ToBoolean($Row.ValueExisted)) {
+                Remove-ItemProperty -Path $PsPath -Name $Row.ValueName -ErrorAction SilentlyContinue
+            }
+        }
+    }
+}
 
 if (Test-Path $PreCopyDest) {
     Write-Host "`n--- ROLLBACK AVAILABLE ---" -ForegroundColor Yellow
@@ -200,40 +396,47 @@ if (Test-Path $PreCopyDest) {
     if ($RollbackChoice -eq "Y" -or $RollbackChoice -eq "y") {
         Write-Host "`nRestoring from pre-change backup..." -ForegroundColor Cyan
 
-        # Restore registry keys
-        Get-ChildItem "$PreCopyDest\Registry_*.reg" -ErrorAction SilentlyContinue | ForEach-Object {
-            reg import $_.FullName 2>$null
-            Write-Host "  Restored: $($_.Name)" -ForegroundColor Green
+        $PreRegistryStateCsv = "$PreCopyDest\Registry_State_PRE.csv"
+        $PreRegistryState = if (Test-Path $PreRegistryStateCsv) { Import-Csv $PreRegistryStateCsv } else { @() }
+        if ($PreRegistryState.Count -gt 0 -and -not ($PreRegistryState[0].PSObject.Properties.Name -contains "Sid")) {
+            # Snapshot from an earlier script version: machine-scope rows only.
+            $PreRegistryState | ForEach-Object { $_ | Add-Member -NotePropertyName Sid -NotePropertyValue "" -Force }
         }
 
-        # Remove hardening keys/values that did not exist in the pre-change snapshot
-        $PreRegistryStateCsv = "$PreCopyDest\Registry_State_PRE.csv"
-        if (Test-Path $PreRegistryStateCsv) {
-            $PreRegistryState = Import-Csv $PreRegistryStateCsv
-            foreach ($KeyGroup in ($PreRegistryState | Group-Object PsPath)) {
-                $Rows = @($KeyGroup.Group)
-                $PsPath = $Rows[0].PsPath
-                $KeyExisted = [System.Convert]::ToBoolean($Rows[0].KeyExisted)
-                if (-not $KeyExisted) {
-                    Remove-Item -Path $PsPath -Recurse -Force -ErrorAction SilentlyContinue
-                    Write-Host "  Removed key created by hardening: $PsPath" -ForegroundColor Green
-                    continue
-                }
-                foreach ($Row in $Rows | Where-Object { $_.ValueName }) {
-                    $ValueExisted = [System.Convert]::ToBoolean($Row.ValueExisted)
-                    if (-not $ValueExisted) {
-                        Remove-ItemProperty -Path $PsPath -Name $Row.ValueName -ErrorAction SilentlyContinue
-                    }
-                }
+        # Machine-wide registry keys
+        Restore-RegistryFromSnapshot -Rows @($PreRegistryState | Where-Object { -not $_.Sid }) -RegFilePattern "$PreCopyDest\Registry_M_*.reg"
+        Get-ChildItem "$PreCopyDest\Registry_*.reg" -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -notlike "Registry_M_*" -and $_.Name -notlike "Registry_U_*" } | ForEach-Object {
+                # .reg files from an earlier script version (no scope prefix)
+                reg import $_.FullName 2>$null
+                Write-Host "  Restored: $($_.Name)" -ForegroundColor Green
             }
-            Write-Host "  Registry-created values cleaned up." -ForegroundColor Green
+        Write-Host "  Machine registry state restored." -ForegroundColor Green
+
+        # Per-user registry keys, one profile at a time (hives loaded on demand)
+        Invoke-ForEachUserHive {
+            param($Root, $Hive)
+            $Rows = @($PreRegistryState | Where-Object { $_.Sid -eq $Hive.Sid })
+            $Pattern = "$PreCopyDest\Registry_U_*_$($Hive.Sid).reg"
+            if ($Rows.Count -gt 0 -or (Get-ChildItem $Pattern -ErrorAction SilentlyContinue)) {
+                Restore-RegistryFromSnapshot -Rows $Rows -RegFilePattern $Pattern
+            }
         }
+        Write-Host "  Per-user registry state restored." -ForegroundColor Green
 
         # Restore security policy
         $PreSecPol = "$PreCopyDest\SecurityPolicy_PRE.cfg"
         if (Test-Path $PreSecPol) {
             secedit /configure /db secedit.sdb /cfg $PreSecPol /quiet
             Write-Host "  Security policy restored." -ForegroundColor Green
+        }
+
+        # Restore audit policy subcategories (Section 16). secedit only carries the
+        # legacy nine categories, so auditpol has its own backup file.
+        $PreAuditPol = "$PreCopyDest\AuditPolicy_PRE.csv"
+        if (Test-Path $PreAuditPol) {
+            auditpol /restore /file:"$PreAuditPol" 2>$null | Out-Null
+            Write-Host "  Audit policy restored." -ForegroundColor Green
         }
 
         # Restore service startup types from CSV
@@ -252,6 +455,34 @@ if (Test-Path $PreCopyDest) {
             Write-Host "  Service startup types restored." -ForegroundColor Green
         }
 
+        # Restore hibernation and the active power plan (Sections 3 and 13)
+        $PreMiscCsv = "$PreCopyDest\Misc_State_PRE.csv"
+        if (Test-Path $PreMiscCsv) {
+            $Misc = @{}
+            Import-Csv $PreMiscCsv | ForEach-Object { $Misc[$_.Key] = $_.Value }
+            if ($Misc["HibernateEnabled"] -eq "1") { powercfg /h on 2>$null | Out-Null; Write-Host "  Hibernation re-enabled." -ForegroundColor Green }
+            if ($Misc["ActivePowerScheme"]) { powercfg /setactive $Misc["ActivePowerScheme"] 2>$null | Out-Null; Write-Host "  Power plan restored." -ForegroundColor Green }
+        }
+
+        # Restore NetBIOS over TCP/IP per adapter (Section 12)
+        $PreNetBiosCsv = "$PreCopyDest\NetBIOS_PRE.csv"
+        if (Test-Path $PreNetBiosCsv) {
+            Import-Csv $PreNetBiosCsv | ForEach-Object {
+                $Cfg = Get-WmiObject Win32_NetworkAdapterConfiguration -Filter "Index=$($_.Index)" -ErrorAction SilentlyContinue
+                if ($Cfg -and $_.TcpipNetbiosOptions -match '^\d+$') { $Cfg.SetTcpipNetbios([int]$_.TcpipNetbiosOptions) | Out-Null }
+            }
+            Write-Host "  NetBIOS settings restored." -ForegroundColor Green
+        }
+
+        # Re-enable telemetry scheduled tasks that were enabled before (Section 22)
+        $PreTasksCsv = "$PreCopyDest\ScheduledTasks_PRE.csv"
+        if (Test-Path $PreTasksCsv) {
+            Import-Csv $PreTasksCsv | Where-Object { $_.State -ne "Disabled" } | ForEach-Object {
+                Enable-ScheduledTask -TaskName $_.TaskName -TaskPath $_.TaskPath -ErrorAction SilentlyContinue | Out-Null
+            }
+            Write-Host "  Scheduled task states restored." -ForegroundColor Green
+        }
+
         # Restore DNS server settings changed by the DoH section
         $PreDnsCsv = "$PreCopyDest\DnsClientServerAddress_PRE.csv"
         if (Test-Path $PreDnsCsv) {
@@ -265,9 +496,22 @@ if (Test-Path $PreCopyDest) {
             Write-Host "  DNS server settings restored." -ForegroundColor Green
         }
 
+        # Remove DoH server registrations the DoH section added (Windows 11 only)
+        $PreDohCsv = "$PreCopyDest\DohServers_PRE.csv"
+        if ((Test-Path $PreDohCsv) -and (Get-Command Remove-DnsClientDohServerAddress -ErrorAction SilentlyContinue)) {
+            $PreDoh = @(Import-Csv $PreDohCsv | Select-Object -ExpandProperty ServerAddress)
+            foreach ($Server in @("1.1.1.1","1.0.0.1")) {
+                if ($PreDoh -notcontains $Server) { Remove-DnsClientDohServerAddress -ServerAddress $Server -ErrorAction SilentlyContinue }
+            }
+            Write-Host "  DoH server registrations restored." -ForegroundColor Green
+        }
+
         Write-Host "`nRollback complete. Reboot recommended." -ForegroundColor Green
-        Write-Host "Registry keys, security policy, and service startup types have been restored." -ForegroundColor Gray
-        Write-Host "Note: Deleted files (cache, prefetch, WER dumps) cannot be restored." -ForegroundColor Yellow
+        Write-Host "Restored: machine and per-user registry keys, security and audit policy, service startup types," -ForegroundColor Gray
+        Write-Host "hibernation, power plan, NetBIOS, telemetry task states, DNS servers and DoH registrations." -ForegroundColor Gray
+        Write-Host "Not restored: deleted files (caches, prefetch, WER dumps, activity history), removed Store apps" -ForegroundColor Yellow
+        Write-Host "(reinstall from the Store), the OEM/CCleaner tasks removed by Section 14, and the two weekly" -ForegroundColor Yellow
+        Write-Host "maintenance tasks this script registers (remove them in Task Scheduler if not wanted)." -ForegroundColor Yellow
         exit 0
     }
 }
@@ -298,42 +542,48 @@ Write-Host "Capturing current state before any changes..." -ForegroundColor Gray
 $PreBackupPath = "$BackupPath\PRE-CHANGE"
 New-Item -ItemType Directory -Force -Path $PreBackupPath | Out-Null
 
-$PreRegistryState = @()
-foreach ($Target in $RegistryRollbackTargets) {
-    $KeyExisted = Test-Path $Target.PsPath
-    if ($Target.Values.Count -eq 0) {
-        $PreRegistryState += [PSCustomObject]@{
-            Name         = $Target.Name
-            PsPath       = $Target.PsPath
-            KeyExisted   = $KeyExisted
-            ValueName    = ""
-            ValueExisted = $false
-        }
+# Records, per key and value, whether it existed before hardening so rollback
+# can remove only what hardening created. Sid is "" for machine-wide keys.
+function Get-RegistrySnapshotRows {
+    param([string]$Name, [string]$PsPath, [string[]]$Values, [string]$Sid)
+    $Rows = @()
+    $KeyExisted = Test-Path $PsPath
+    if ($Values.Count -eq 0) {
+        $Rows += [PSCustomObject]@{ Sid = $Sid; Name = $Name; PsPath = $PsPath; KeyExisted = $KeyExisted; ValueName = ""; ValueExisted = $false }
     } else {
-        $Props = if ($KeyExisted) { Get-ItemProperty -Path $Target.PsPath -ErrorAction SilentlyContinue } else { $null }
-        foreach ($ValueName in $Target.Values) {
+        $Props = if ($KeyExisted) { Get-ItemProperty -Path $PsPath -ErrorAction SilentlyContinue } else { $null }
+        foreach ($ValueName in $Values) {
             $ValueExisted = $false
             if ($Props) { $ValueExisted = ($Props.PSObject.Properties.Name -contains $ValueName) }
-            $PreRegistryState += [PSCustomObject]@{
-                Name         = $Target.Name
-                PsPath       = $Target.PsPath
-                KeyExisted   = $KeyExisted
-                ValueName    = $ValueName
-                ValueExisted = $ValueExisted
-            }
+            $Rows += [PSCustomObject]@{ Sid = $Sid; Name = $Name; PsPath = $PsPath; KeyExisted = $KeyExisted; ValueName = $ValueName; ValueExisted = $ValueExisted }
         }
     }
+    return $Rows
 }
-$PreRegistryState | Export-Csv "$PreBackupPath\Registry_State_PRE.csv" -NoTypeInformation
 
+$script:PreRegistryState = @()
 foreach ($Target in $RegistryRollbackTargets) {
-    reg export $Target.RegPath "$PreBackupPath\Registry_$($Target.Name).reg" /y 2>$null
+    $script:PreRegistryState += Get-RegistrySnapshotRows -Name $Target.Name -PsPath $Target.PsPath -Values $Target.Values -Sid ""
+    reg export $Target.RegPath "$PreBackupPath\Registry_M_$($Target.Name).reg" /y 2>$null
     if ($LASTEXITCODE -eq 0) { Write-Host "  Exported: $($Target.Name)" -ForegroundColor Green }
     else { Write-Host "  Skipped (key not yet present): $($Target.Name)" -ForegroundColor Gray }
 }
 
+Invoke-ForEachUserHive {
+    param($Root, $Hive)
+    foreach ($Target in $UserRegistryRollbackTargets) {
+        $PsPath  = "$Root\$($Target.SubPath)"
+        $RegPath = "HKEY_USERS\$($Hive.Sid)\$($Target.SubPath)"
+        $script:PreRegistryState += Get-RegistrySnapshotRows -Name $Target.Name -PsPath $PsPath -Values $Target.Values -Sid $Hive.Sid
+        reg export $RegPath "$PreBackupPath\Registry_U_$($Target.Name)_$($Hive.Sid).reg" /y 2>$null
+    }
+    Write-Host "  Exported per-user keys: $($Hive.Name)" -ForegroundColor Green
+}
+$script:PreRegistryState | Export-Csv "$PreBackupPath\Registry_State_PRE.csv" -NoTypeInformation
+
 gpresult /h "$PreBackupPath\GroupPolicy_Report_PRE.html" /f 2>$null
 secedit /export /cfg "$PreBackupPath\SecurityPolicy_PRE.cfg" /quiet
+auditpol /backup /file:"$PreBackupPath\AuditPolicy_PRE.csv" 2>$null | Out-Null
 
 $PreServicesReport = @()
 foreach ($SvcName in @("WSearch","DiagTrack","WerSvc","SysMain","DoSvc","CDPSvc","CDPUserSvc","FileSyncHelper","OneSyncSvc","VMAuthdService","SCardSvr","ScDeviceEnum","wuauserv")) {
@@ -345,10 +595,41 @@ foreach ($SvcName in @("WSearch","DiagTrack","WerSvc","SysMain","DoSvc","CDPSvc"
 }
 $PreServicesReport | Export-Csv "$PreBackupPath\Services_State_PRE.csv" -NoTypeInformation
 
+# Hibernation state and active power plan (Sections 3 and 13)
+$PreHibernate = (Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\Power" -Name "HibernateEnabled" -ErrorAction SilentlyContinue).HibernateEnabled
+$PreScheme = ((powercfg /getactivescheme 2>$null) | Select-String -Pattern '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}')
+$PreSchemeGuid = if ($PreScheme) { $PreScheme.Matches[0].Value } else { "" }
+@(
+    [PSCustomObject]@{ Key = "HibernateEnabled";  Value = "$PreHibernate" },
+    [PSCustomObject]@{ Key = "ActivePowerScheme"; Value = $PreSchemeGuid }
+) | Export-Csv "$PreBackupPath\Misc_State_PRE.csv" -NoTypeInformation
+
+# NetBIOS over TCP/IP per adapter (Section 12)
+Get-WmiObject Win32_NetworkAdapterConfiguration -ErrorAction SilentlyContinue |
+    Where-Object { $_.IPEnabled } |
+    Select-Object Index, Description, TcpipNetbiosOptions |
+    Export-Csv "$PreBackupPath\NetBIOS_PRE.csv" -NoTypeInformation
+
+# Telemetry scheduled task states (Section 22)
+$PreTaskStates = @()
+foreach ($TaskPath in $TelemetryTaskPaths) {
+    $Leaf   = Split-Path $TaskPath -Leaf
+    $Folder = (Split-Path $TaskPath -Parent) + "\"
+    $t = Get-ScheduledTask -TaskName $Leaf -TaskPath $Folder -ErrorAction SilentlyContinue
+    if ($t) { $PreTaskStates += [PSCustomObject]@{ TaskPath = $t.TaskPath; TaskName = $t.TaskName; State = "$($t.State)" } }
+}
+$PreTaskStates | Export-Csv "$PreBackupPath\ScheduledTasks_PRE.csv" -NoTypeInformation
+
+# DNS servers and DoH registrations (Section 17)
 Get-DnsClientServerAddress -ErrorAction SilentlyContinue |
     Where-Object { $_.AddressFamily -eq 2 } |
     Select-Object InterfaceAlias, InterfaceIndex, @{Name="ServerAddresses";Expression={$_.ServerAddresses -join ';'}} |
     Export-Csv "$PreBackupPath\DnsClientServerAddress_PRE.csv" -NoTypeInformation
+if (Get-Command Get-DnsClientDohServerAddress -ErrorAction SilentlyContinue) {
+    @(Get-DnsClientDohServerAddress -ErrorAction SilentlyContinue) |
+        Select-Object ServerAddress, DohTemplate, AutoUpgrade, AllowFallbackToUdp |
+        Export-Csv "$PreBackupPath\DohServers_PRE.csv" -NoTypeInformation
+}
 
 "Pre-hardening backup captured on $Date for $MachineName ($AdminUser).`nRepresents machine state BEFORE hardening. Use for rollback if needed." | Out-File "$PreBackupPath\README.txt" -Encoding UTF8
 
@@ -468,84 +749,55 @@ try {
 # -----------------------------------------------------------------------------
 # SECTION 1: THUMBNAIL CACHE
 # -----------------------------------------------------------------------------
-Write-Host "`n[1/22] Thumbnail Cache..." -ForegroundColor Yellow
-
-if (Should-Skip "ThumbnailCache") {
-    Write-Host "  Already completed in previous run. Skipping." -ForegroundColor DarkGray
-    Record-Section "ThumbnailCache" "RESUMED-SKIP"
-} elseif (Confirm-Section -SectionName "Thumbnail Cache" `
+Invoke-Section -Number 1 -Key "ThumbnailCache" -Title "Thumbnail Cache" `
     -Info "Windows Explorer generates thumbnail images of photos, videos, and documents and stores them in thumbcache_*.db in AppData. This database persists even after original files are deleted. A forensic examiner can extract it to see images of files that no longer exist on the system." `
     -Benefits "Disabling thumbnail caching prevents creation of this forensic artefact. Existing cache files are deleted. Reduces unnecessary disk writes. No meaningful performance impact on modern SSDs." `
-    -Considerations "Applied via HKCU registry key so applies to whoever runs the script only. Explorer thumbnails still display for the current session until restarted. After reboot, folder views show generic icons for image files instead of previews.") {
-
-    $ThumbKey = "HKCU:\Software\Policies\Microsoft\Windows\Explorer"
+    -Considerations "Applied as a machine-wide policy key so it covers every account on the machine. Existing thumbnail caches are cleared for every user profile; a signed-in user's cache file may be locked and is then skipped. Explorer thumbnails still display for the current session until restarted. After reboot, folder views show generic icons for image files instead of previews." `
+    -Action {
+    $ThumbKey = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Explorer"
     If (!(Test-Path $ThumbKey)) { New-Item -Path $ThumbKey -Force | Out-Null }
     Set-ItemProperty -Path $ThumbKey -Name "DisableThumbnails" -Value 1 -Type DWord
-    $ThumbDB = "$AdminProfile\AppData\Local\Microsoft\Windows\Explorer"
-    If (Test-Path $ThumbDB) {
-        Get-ChildItem "$ThumbDB\thumbcache_*.db" -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
-    }
-    Write-Host "  Done." -ForegroundColor Green
-    Record-Section "ThumbnailCache" "APPLIED"
-} else { Write-Host "  Skipped." -ForegroundColor DarkGray; Record-Section "ThumbnailCache" "SKIPPED" }
+    Clear-PerProfileFiles -RelativeFolder "AppData\Local\Microsoft\Windows\Explorer" -Pattern "thumbcache_*.db"
+}
 
 
 # -----------------------------------------------------------------------------
 # SECTION 2: WINDOWS SEARCH INDEX
 # -----------------------------------------------------------------------------
-Write-Host "`n[2/22] Windows Search Index..." -ForegroundColor Yellow
-
-if (Should-Skip "WindowsSearch") {
-    Write-Host "  Already completed in previous run. Skipping." -ForegroundColor DarkGray
-    Record-Section "WindowsSearch" "RESUMED-SKIP"
-} elseif (Confirm-Section -SectionName "Windows Search Index" `
+Invoke-Section -Number 2 -Key "WindowsSearch" -Title "Windows Search Index" `
     -Info "Windows Search maintains a database of metadata about files including names, content, authors, and dates. The WSearch service runs constantly in the background. The index database Windows.edb can be several gigabytes." `
     -Benefits "Disabling the index removes a persistent metadata store that documents file activity. Frees significant disk space. Reduces background CPU and disk usage. Start menu app search remains fast on SSD machines without the index." `
-    -Considerations "File content search in File Explorer will no longer work. Start menu app search still works. Outlook search may be slower for large mailboxes. Enterprise environments may have GPO that re-enables WSearch after reboot.") {
-
+    -Considerations "File content search in File Explorer will no longer work. Start menu app search still works. Outlook search may be slower for large mailboxes. Enterprise environments may have GPO that re-enables WSearch after reboot." `
+    -Action {
     Stop-Service -Name "WSearch" -Force -ErrorAction SilentlyContinue
     Set-Service -Name "WSearch" -StartupType Disabled -ErrorAction SilentlyContinue
     $IndexDB = "C:\ProgramData\Microsoft\Search\Data\Applications\Windows\Windows.edb"
     If (Test-Path $IndexDB) { Remove-Item $IndexDB -Force -ErrorAction SilentlyContinue }
-    Write-Host "  Done." -ForegroundColor Green
-    Record-Section "WindowsSearch" "APPLIED"
-} else { Write-Host "  Skipped." -ForegroundColor DarkGray; Record-Section "WindowsSearch" "SKIPPED" }
+}
 
 
 # -----------------------------------------------------------------------------
 # SECTION 3: HIBERNATION AND FAST STARTUP
 # -----------------------------------------------------------------------------
-Write-Host "`n[3/22] Hibernation and Fast Startup..." -ForegroundColor Yellow
-
-if (Should-Skip "Hibernation") {
-    Write-Host "  Already completed in previous run. Skipping." -ForegroundColor DarkGray
-    Record-Section "Hibernation" "RESUMED-SKIP"
-} elseif (Confirm-Section -SectionName "Hibernation and Fast Startup" `
+Invoke-Section -Number 3 -Key "Hibernation" -Title "Hibernation and Fast Startup" `
     -Info "Hibernation saves entire RAM contents to hiberfil.sys on the system drive, as large as total installed RAM. Fast Startup uses a partial hibernate to speed up boot times by saving the kernel session to disk." `
     -Benefits "hiberfil.sys contains a complete RAM snapshot including encryption keys and credentials. Deleting it removes this forensic artefact and reclaims disk space. Fast Startup can cause issues with BitLocker and dual-boot setups." `
-    -Considerations "If the machine uses hibernate for power saving (lid close on a laptop) this will change that behaviour. Sleep (RAM-powered) still works. On SSD machines boot time difference is imperceptible. Do not apply if hibernate is used intentionally.") {
-
+    -Considerations "If the machine uses hibernate for power saving (lid close on a laptop) this will change that behaviour. Sleep (RAM-powered) still works. On SSD machines boot time difference is imperceptible. Do not apply if hibernate is used intentionally." `
+    -Action {
     powercfg /h off 2>$null
     $FastStartup = "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power"
     Set-ItemProperty -Path $FastStartup -Name "HiberbootEnabled" -Value 0 -Type DWord -ErrorAction SilentlyContinue
-    Write-Host "  Done." -ForegroundColor Green
-    Record-Section "Hibernation" "APPLIED"
-} else { Write-Host "  Skipped." -ForegroundColor DarkGray; Record-Section "Hibernation" "SKIPPED" }
+}
 
 
 # -----------------------------------------------------------------------------
 # SECTION 4: TELEMETRY
 # -----------------------------------------------------------------------------
-Write-Host "`n[4/22] Telemetry..." -ForegroundColor Yellow
-
-if (Should-Skip "Telemetry") {
-    Write-Host "  Already completed in previous run. Skipping." -ForegroundColor DarkGray
-    Record-Section "Telemetry" "RESUMED-SKIP"
-} elseif (Confirm-Section -SectionName "Telemetry" `
+Invoke-Section -Number 4 -Key "Telemetry" -Title "Telemetry" `
     -Info "Windows collects and transmits diagnostic and usage data to Microsoft continuously via the DiagTrack service. This includes app usage, hardware configuration, error reports, browser history via Edge, search queries, and behavioural patterns. Data is queued locally before being sent." `
     -Benefits "Setting AllowTelemetry to 0 instructs Windows to collect and transmit minimum data. Stopping DiagTrack prevents the service from running. Clearing the Diagnosis folder removes queued data. Reduces background network activity." `
-    -Considerations "On Windows 11 Home and Pro, value 0 is the most restrictive available. Microsoft may still collect some data. On child accounts managed via Microsoft Family Safety, AllowTelemetry 0 may interfere with activity reporting. Use value 1 on Family Safety machines.") {
-
+    -Considerations "On Windows 11 Home and Pro, value 0 is the most restrictive available. Microsoft may still collect some data. On child accounts managed via Microsoft Family Safety, AllowTelemetry 0 may interfere with activity reporting. Use value 1 on Family Safety machines." `
+    -Action {
     $TelemetryKey = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection"
     If (!(Test-Path $TelemetryKey)) { New-Item -Path $TelemetryKey -Force | Out-Null }
     Set-ItemProperty -Path $TelemetryKey -Name "AllowTelemetry" -Value 0 -Type DWord
@@ -555,24 +807,17 @@ if (Should-Skip "Telemetry") {
     If (Test-Path $DiagFolder) {
         Get-ChildItem $DiagFolder -Recurse -ErrorAction SilentlyContinue | Remove-Item -Force -Recurse -ErrorAction SilentlyContinue
     }
-    Write-Host "  Done." -ForegroundColor Green
-    Record-Section "Telemetry" "APPLIED"
-} else { Write-Host "  Skipped." -ForegroundColor DarkGray; Record-Section "Telemetry" "SKIPPED" }
+}
 
 
 # -----------------------------------------------------------------------------
 # SECTION 5: WINDOWS ERROR REPORTING
 # -----------------------------------------------------------------------------
-Write-Host "`n[5/22] Windows Error Reporting..." -ForegroundColor Yellow
-
-if (Should-Skip "ErrorReporting") {
-    Write-Host "  Already completed in previous run. Skipping." -ForegroundColor DarkGray
-    Record-Section "ErrorReporting" "RESUMED-SKIP"
-} elseif (Confirm-Section -SectionName "Windows Error Reporting" `
+Invoke-Section -Number 5 -Key "ErrorReporting" -Title "Windows Error Reporting" `
     -Info "When an application crashes, WER packages a diagnostic report that can include a full or partial memory dump. Memory dumps can contain sensitive data including credentials, encryption keys, and document contents that were in memory at the time of the crash." `
     -Benefits "Disabling WER prevents memory dumps from being created and sent to Microsoft. Clears existing dumps. Removes the 'Windows is looking for a solution' dialog after crashes. Reduces data exfiltration risk from crash artefacts." `
-    -Considerations "Disabling WER removes the ability to receive suggested fixes from Microsoft based on crash data. Developers or IT support staff who rely on crash dump analysis will lose that capability. Application stability is not affected.") {
-
+    -Considerations "Disabling WER removes the ability to receive suggested fixes from Microsoft based on crash data. Developers or IT support staff who rely on crash dump analysis will lose that capability. Application stability is not affected." `
+    -Action {
     Stop-Service -Name "WerSvc" -Force -ErrorAction SilentlyContinue
     Set-Service -Name "WerSvc" -StartupType Disabled -ErrorAction SilentlyContinue
     $WERKey = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Error Reporting"
@@ -587,9 +832,7 @@ if (Should-Skip "ErrorReporting") {
             Get-ChildItem $folder -ErrorAction SilentlyContinue | Remove-Item -Force -Recurse -ErrorAction SilentlyContinue
         }
     }
-    Write-Host "  Done." -ForegroundColor Green
-    Record-Section "ErrorReporting" "APPLIED"
-} else { Write-Host "  Skipped." -ForegroundColor DarkGray; Record-Section "ErrorReporting" "SKIPPED" }
+}
 
 
 # -----------------------------------------------------------------------------
@@ -627,16 +870,11 @@ if (Should-Skip "ErrorReporting") {
 #   determined via WMI, the script defaults to leaving SysMain enabled and logs
 #   a note so the operator can decide manually.
 # -----------------------------------------------------------------------------
-Write-Host "`n[6/22] Prefetch and Superfetch..." -ForegroundColor Yellow
-
-if (Should-Skip "Prefetch") {
-    Write-Host "  Already completed in previous run. Skipping." -ForegroundColor DarkGray
-    Record-Section "Prefetch" "RESUMED-SKIP"
-} elseif (Confirm-Section -SectionName "Prefetch and Superfetch (SysMain)" `
+Invoke-Section -Number 6 -Key "Prefetch" -Title "Prefetch and Superfetch (SysMain)" `
     -Info "Windows Prefetch logs every executable that has run, when it ran, and how many times. SysMain (Superfetch) analyses usage patterns and preloads applications into RAM. Superfetch is specifically designed to compensate for slow random-read performance on HDDs. On SSDs it provides minimal benefit. Prefetch file logging is a forensic artefact that is worth disabling on all disk types." `
     -Benefits "Disabling Prefetch removes a forensic log of every executable ever run on the machine including deleted malware. On SSD machines, disabling SysMain frees RAM used for unnecessary speculative preloading. The script detects disk type automatically and preserves SysMain on HDDs where it meaningfully improves performance." `
-    -Considerations "Superfetch is detected and disabled only on SSD machines. On HDD machines SysMain is left active to preserve application launch performance. If disk type detection via WMI fails, SysMain is left enabled and a note is logged. Prefetch file creation (EnablePrefetcher) is set to 0 on all machines regardless of disk type.") {
-
+    -Considerations "Superfetch is detected and disabled only on SSD machines. On HDD machines SysMain is left active to preserve application launch performance. If disk type detection via WMI fails, SysMain is left enabled and a note is logged. Prefetch file creation (EnablePrefetcher) is set to 0 on all machines regardless of disk type." `
+    -Action {
     # Detect disk type for C: drive via WMI
     $CIsSSD = $false
     try {
@@ -651,11 +889,11 @@ if (Should-Skip "Prefetch") {
             }
         } else {
             Write-Host "  NOTE: Disk type could not be determined via WMI. SysMain left enabled." -ForegroundColor Yellow
-            $Warnings += "Section 6: Disk type detection failed. Superfetch (SysMain) left enabled. Review manually."
+            $script:Warnings += "Section 6: Disk type detection failed. Superfetch (SysMain) left enabled. Review manually."
         }
     } catch {
         Write-Host "  NOTE: Disk type detection failed. SysMain left enabled." -ForegroundColor Yellow
-        $Warnings += "Section 6: Disk type detection failed ($($_.Exception.Message)). Superfetch (SysMain) left enabled. Review manually."
+        $script:Warnings += "Section 6: Disk type detection failed ($($_.Exception.Message)). Superfetch (SysMain) left enabled. Review manually."
     }
 
     $PrefetchKey = "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management\PrefetchParameters"
@@ -678,38 +916,17 @@ if (Should-Skip "Prefetch") {
     If (Test-Path $PrefetchFolder) {
         Get-ChildItem $PrefetchFolder -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
     }
-
-    Write-Host "  Done." -ForegroundColor Green
-    Record-Section "Prefetch" "APPLIED"
-} else { Write-Host "  Skipped." -ForegroundColor DarkGray; Record-Section "Prefetch" "SKIPPED" }
+}
 
 
 # -----------------------------------------------------------------------------
 # SECTION 7: RECENT FILES AND JUMP LISTS
 # -----------------------------------------------------------------------------
-Write-Host "`n[7/22] Recent Files, Jump Lists and Orphaned Run Keys..." -ForegroundColor Yellow
-
-if (Should-Skip "RecentFiles") {
-    Write-Host "  Already completed in previous run. Skipping." -ForegroundColor DarkGray
-    Record-Section "RecentFiles" "RESUMED-SKIP"
-} elseif (Confirm-Section -SectionName "Recent Files, Jump Lists and Orphaned Run Keys" `
+Invoke-Section -Number 7 -Key "RecentFiles" -Title "Recent Files, Jump Lists and Orphaned Run Keys" `
     -Info "Windows maintains a history of recently opened files and applications in the RecentDocs registry key, the Recent folder, and Jump List databases. These create a ready-made timeline of user activity. Orphaned Run keys are startup entries left behind by uninstalled software." `
     -Benefits "Disabling recent document tracking prevents Windows from building an activity timeline going forward. Clearing existing files removes the current history. Removing orphaned Run keys eliminates startup errors and reduces boot time." `
-    -Considerations "Run key cleanup operates on the current session HKCU hive only and targets common orphaned keys. No hardcoded SIDs are used so this is safe on any machine. Users who rely on Quick Access in File Explorer to navigate recent files will lose that convenience.") {
-
-    $RecentKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
-    Set-ItemProperty -Path $RecentKey -Name "Start_TrackDocs" -Value 0 -Type DWord -ErrorAction SilentlyContinue
-    foreach ($folder in @(
-        "$AdminProfile\AppData\Roaming\Microsoft\Windows\Recent",
-        "$AdminProfile\AppData\Roaming\Microsoft\Windows\Recent\AutomaticDestinations",
-        "$AdminProfile\AppData\Roaming\Microsoft\Windows\Recent\CustomDestinations"
-    )) {
-        If (Test-Path $folder) {
-            Get-ChildItem $folder -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
-        }
-    }
-    Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\RecentDocs" -Name * -ErrorAction SilentlyContinue
-
+    -Considerations "Applied to every user profile on the machine (hives of signed-out users are loaded temporarily) and to the machine-wide Run key. Run key cleanup targets common orphaned entries only. No hardcoded SIDs are used so this is safe on any machine. Users who rely on Quick Access in File Explorer to navigate recent files will lose that convenience." `
+    -Action {
     function Test-StartupCommandTargetExists {
         param([string]$Command)
         if ([string]::IsNullOrWhiteSpace($Command)) { return $false }
@@ -722,41 +939,50 @@ if (Should-Skip "RecentFiles") {
         return (Test-Path $ExePath)
     }
 
-    foreach ($RunPath in @("HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run","HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run")) {
+    function Remove-OrphanedRunEntries {
+        param([string]$RunPath)
         $RunProps = Get-ItemProperty -Path $RunPath -ErrorAction SilentlyContinue
-        if (!$RunProps) { continue }
+        if (!$RunProps) { return }
         foreach ($key in @("Teams","OneDrive")) {
             $Prop = $RunProps.PSObject.Properties[$key]
             if ($Prop -and -not (Test-StartupCommandTargetExists $Prop.Value)) {
                 Remove-ItemProperty -Path $RunPath -Name $key -ErrorAction SilentlyContinue
-                Write-Host "  Removed orphaned startup entry: $key" -ForegroundColor Green
+                Write-Host "  Removed orphaned startup entry: $key ($RunPath)" -ForegroundColor Green
             }
         }
-    }
-    $RunProps = Get-ItemProperty "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run" -ErrorAction SilentlyContinue
-    if ($RunProps) {
         $RunProps.PSObject.Properties | Where-Object { $_.Name -like "MicrosoftEdgeAutoLaunch*" } | ForEach-Object {
-            Remove-ItemProperty -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run" -Name $_.Name -ErrorAction SilentlyContinue
+            Remove-ItemProperty -Path $RunPath -Name $_.Name -ErrorAction SilentlyContinue
         }
     }
-    Write-Host "  Done." -ForegroundColor Green
-    Record-Section "RecentFiles" "APPLIED"
-} else { Write-Host "  Skipped." -ForegroundColor DarkGray; Record-Section "RecentFiles" "SKIPPED" }
+
+    Remove-OrphanedRunEntries "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run"
+
+    Invoke-ForEachUserHive {
+        param($Root, $Hive)
+        $RecentKey = "$Root\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
+        If (!(Test-Path $RecentKey)) { New-Item -Path $RecentKey -Force | Out-Null }
+        Set-ItemProperty -Path $RecentKey -Name "Start_TrackDocs" -Value 0 -Type DWord -ErrorAction SilentlyContinue
+        Remove-ItemProperty -Path "$Root\Software\Microsoft\Windows\CurrentVersion\Explorer\RecentDocs" -Name * -ErrorAction SilentlyContinue
+        Remove-OrphanedRunEntries "$Root\Software\Microsoft\Windows\CurrentVersion\Run"
+    }
+    foreach ($Relative in @(
+        "AppData\Roaming\Microsoft\Windows\Recent",
+        "AppData\Roaming\Microsoft\Windows\Recent\AutomaticDestinations",
+        "AppData\Roaming\Microsoft\Windows\Recent\CustomDestinations"
+    )) {
+        Clear-PerProfileFiles -RelativeFolder $Relative
+    }
+}
 
 
 # -----------------------------------------------------------------------------
 # SECTION 8: LOCATION TRACKING
 # -----------------------------------------------------------------------------
-Write-Host "`n[8/22] Location Tracking..." -ForegroundColor Yellow
-
-if (Should-Skip "LocationTracking") {
-    Write-Host "  Already completed in previous run. Skipping." -ForegroundColor DarkGray
-    Record-Section "LocationTracking" "RESUMED-SKIP"
-} elseif (Confirm-Section -SectionName "Location Tracking" `
+Invoke-Section -Number 8 -Key "LocationTracking" -Title "Location Tracking" `
     -Info "Windows includes a location service that allows applications to request the device's physical location via GPS, WiFi triangulation, or IP geolocation. Location history is stored locally and can be queried by applications in the background without prominent user notification." `
     -Benefits "Disabling location services prevents applications from accessing location data silently. Clearing the history log removes stored location records. Reduces the amount of sensitive personal data stored on the machine." `
-    -Considerations "Applied via Group Policy registry keys which is more persistent than the Settings toggle. Apps that legitimately need location will stop working correctly. Microsoft Family Safety uses a separate location mechanism and is not affected.") {
-
+    -Considerations "Applied via Group Policy registry keys which is more persistent than the Settings toggle. Apps that legitimately need location will stop working correctly. Microsoft Family Safety uses a separate location mechanism and is not affected." `
+    -Action {
     $LocationKey = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\LocationAndSensors"
     If (!(Test-Path $LocationKey)) { New-Item -Path $LocationKey -Force | Out-Null }
     Set-ItemProperty -Path $LocationKey -Name "DisableLocation" -Value 1 -Type DWord
@@ -764,24 +990,17 @@ if (Should-Skip "LocationTracking") {
     If (Test-Path $LocationHistory) {
         Get-ChildItem $LocationHistory -Recurse -ErrorAction SilentlyContinue | Remove-Item -Force -Recurse -ErrorAction SilentlyContinue
     }
-    Write-Host "  Done." -ForegroundColor Green
-    Record-Section "LocationTracking" "APPLIED"
-} else { Write-Host "  Skipped." -ForegroundColor DarkGray; Record-Section "LocationTracking" "SKIPPED" }
+}
 
 
 # -----------------------------------------------------------------------------
 # SECTION 9: DELIVERY OPTIMISATION
 # -----------------------------------------------------------------------------
-Write-Host "`n[9/22] Delivery Optimisation..." -ForegroundColor Yellow
-
-if (Should-Skip "DeliveryOptimisation") {
-    Write-Host "  Already completed in previous run. Skipping." -ForegroundColor DarkGray
-    Record-Section "DeliveryOptimisation" "RESUMED-SKIP"
-} elseif (Confirm-Section -SectionName "Delivery Optimisation" `
+Invoke-Section -Number 9 -Key "DeliveryOptimisation" -Title "Delivery Optimisation" `
     -Info "Windows Delivery Optimisation uses your machine's internet connection as a peer-to-peer relay to distribute Windows updates to other computers, both on your local network and across the internet. Enabled by default with no prominent notification. Can consume significant bandwidth and disk space." `
     -Benefits "Setting DODownloadMode to HTTP-only stops your machine acting as an upload relay for Microsoft's update distribution network and prevents unexpected bandwidth consumption. Clears the local cache. Your machine still receives its own updates normally via Windows Update." `
-    -Considerations "The DoSvc service itself is left running (Windows Update depends on it to download update payloads, not just for peer-to-peer sharing; force-disabling it via the registry can cause Windows Update downloads to fail or hang). Only the peer-to-peer download mode is turned off via policy. In enterprise environments this may conflict with WSUS or Intune-managed update policies.") {
-
+    -Considerations "The DoSvc service itself is left running (Windows Update depends on it to download update payloads, not just for peer-to-peer sharing; force-disabling it via the registry can cause Windows Update downloads to fail or hang). Only the peer-to-peer download mode is turned off via policy. In enterprise environments this may conflict with WSUS or Intune-managed update policies." `
+    -Action {
     $DOKey = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\DeliveryOptimization"
     If (!(Test-Path $DOKey)) { New-Item -Path $DOKey -Force | Out-Null }
     Set-ItemProperty -Path $DOKey -Name "DODownloadMode" -Value 0 -Type DWord
@@ -789,24 +1008,17 @@ if (Should-Skip "DeliveryOptimisation") {
     If (Test-Path $DOCache) {
         Get-ChildItem $DOCache -Recurse -ErrorAction SilentlyContinue | Remove-Item -Force -Recurse -ErrorAction SilentlyContinue
     }
-    Write-Host "  Done." -ForegroundColor Green
-    Record-Section "DeliveryOptimisation" "APPLIED"
-} else { Write-Host "  Skipped." -ForegroundColor DarkGray; Record-Section "DeliveryOptimisation" "SKIPPED" }
+}
 
 
 # -----------------------------------------------------------------------------
 # SECTION 10: ACTIVITY HISTORY AND CONNECTED DEVICES PLATFORM
 # -----------------------------------------------------------------------------
-Write-Host "`n[10/22] Activity History and CDP..." -ForegroundColor Yellow
-
-if (Should-Skip "ActivityHistory") {
-    Write-Host "  Already completed in previous run. Skipping." -ForegroundColor DarkGray
-    Record-Section "ActivityHistory" "RESUMED-SKIP"
-} elseif (Confirm-Section -SectionName "Activity History and Connected Devices Platform" `
+Invoke-Section -Number 10 -Key "ActivityHistory" -Title "Activity History and Connected Devices Platform" `
     -Info "Windows Activity History logs every app opened, file accessed, and website visited in Edge, syncing to Microsoft servers when signed into a Microsoft account. CDP services (CDPSvc and CDPUserSvc) manage device connectivity and this activity data. The database ActivitiesCache.db is stored in ConnectedDevicesPlatform." `
     -Benefits "Disabling activity history prevents creation of a detailed usage timeline. Stopping CDP services closes the sync channel to Microsoft. Deleting the ConnectedDevicesPlatform folder removes the existing activity database." `
-    -Considerations "CDPSvc resists Set-Service even as Administrator. The registry Start value is set directly to 4. The CDP folder must be deleted while CDP services are stopped otherwise ActivitiesCache.db will be locked. Does not affect OneDrive, Microsoft 365, or standard Windows functionality.") {
-
+    -Considerations "CDPSvc resists Set-Service even as Administrator. The registry Start value is set directly to 4. The CDP folder must be deleted while CDP services are stopped otherwise ActivitiesCache.db will be locked. Does not affect OneDrive, Microsoft 365, or standard Windows functionality." `
+    -Action {
     $ActivityKey = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\System"
     If (!(Test-Path $ActivityKey)) { New-Item -Path $ActivityKey -Force | Out-Null }
     Set-ItemProperty -Path $ActivityKey -Name "EnableActivityFeed" -Value 0 -Type DWord
@@ -817,24 +1029,17 @@ if (Should-Skip "ActivityHistory") {
     Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\CDPSvc" -Name "Start" -Value 4 -ErrorAction SilentlyContinue
     $CDPFolder = "$AdminProfile\AppData\Local\ConnectedDevicesPlatform"
     If (Test-Path $CDPFolder) { Remove-Item $CDPFolder -Recurse -Force -ErrorAction SilentlyContinue }
-    Write-Host "  Done." -ForegroundColor Green
-    Record-Section "ActivityHistory" "APPLIED"
-} else { Write-Host "  Skipped." -ForegroundColor DarkGray; Record-Section "ActivityHistory" "SKIPPED" }
+}
 
 
 # -----------------------------------------------------------------------------
 # SECTION 11: WINDOWS INK AND HANDWRITING
 # -----------------------------------------------------------------------------
-Write-Host "`n[11/22] Windows Ink and Handwriting..." -ForegroundColor Yellow
-
-if (Should-Skip "WindowsInk") {
-    Write-Host "  Already completed in previous run. Skipping." -ForegroundColor DarkGray
-    Record-Section "WindowsInk" "RESUMED-SKIP"
-} elseif (Confirm-Section -SectionName "Windows Ink and Handwriting Personalisation" `
+Invoke-Section -Number 11 -Key "WindowsInk" -Title "Windows Ink and Handwriting Personalisation" `
     -Info "Windows Ink Workspace is designed for stylus and touchscreen use and phones home with usage analytics. Windows Handwriting Personalisation collects samples of everything you type or write to improve handwriting recognition, stored in the InputPersonalization folder." `
     -Benefits "Disabling Windows Ink removes an unnecessary background process on machines without a touchscreen or stylus. Disabling handwriting personalisation stops collection of typed and written input samples. Clearing the InputPersonalization folder removes previously collected samples." `
-    -Considerations "On touchscreen or stylus machines, disabling Windows Ink removes convenient access to sketchpad and screen sketch tools. Handwriting recognition accuracy may decrease over time though pre-trained models remain functional.") {
-
+    -Considerations "On touchscreen or stylus machines, disabling Windows Ink removes convenient access to sketchpad and screen sketch tools. Handwriting recognition accuracy may decrease over time though pre-trained models remain functional." `
+    -Action {
     $InkKey = "HKLM:\SOFTWARE\Policies\Microsoft\WindowsInkWorkspace"
     If (!(Test-Path $InkKey)) { New-Item -Path $InkKey -Force | Out-Null }
     Set-ItemProperty -Path $InkKey -Name "AllowWindowsInkWorkspace" -Value 0 -Type DWord
@@ -846,47 +1051,33 @@ if (Should-Skip "WindowsInk") {
             Get-ChildItem $folder -Recurse -ErrorAction SilentlyContinue | Remove-Item -Force -Recurse -ErrorAction SilentlyContinue
         }
     }
-    Write-Host "  Done." -ForegroundColor Green
-    Record-Section "WindowsInk" "APPLIED"
-} else { Write-Host "  Skipped." -ForegroundColor DarkGray; Record-Section "WindowsInk" "SKIPPED" }
+}
 
 
 # -----------------------------------------------------------------------------
 # SECTION 12: NETWORK HARDENING - LLMNR AND NETBIOS
 # -----------------------------------------------------------------------------
-Write-Host "`n[12/22] Network Hardening (LLMNR and NetBIOS)..." -ForegroundColor Yellow
-
-if (Should-Skip "NetworkHardening") {
-    Write-Host "  Already completed in previous run. Skipping." -ForegroundColor DarkGray
-    Record-Section "NetworkHardening" "RESUMED-SKIP"
-} elseif (Confirm-Section -SectionName "Network Hardening - LLMNR and NetBIOS" `
+Invoke-Section -Number 12 -Key "NetworkHardening" -Title "Network Hardening - LLMNR and NetBIOS" `
     -Info "LLMNR resolves hostnames on the local network when DNS fails by broadcasting a query to the entire subnet. An attacker running Responder on the same subnet can respond to these broadcasts and capture NTLMv2 credential hashes. LLMNR has been a standard internal pentest initial access technique for over a decade. NetBIOS broadcasts your machine name, domain name, and logged-on username." `
     -Benefits "Disabling LLMNR via the EnableMulticast policy key prevents Windows from sending or responding to LLMNR broadcasts, eliminating the Responder attack surface. Disabling NetBIOS via WMI SetTcpipNetbios applies to all active network adapters including VPN and virtual adapters. Both changes take effect immediately." `
-    -Considerations "LLMNR is only used when DNS resolution fails. On a correctly configured network with working DNS, disabling LLMNR has no functional impact. NetBIOS is required for legacy SMB1 file sharing in very old environments. Modern SMB2/3 does not require NetBIOS.") {
-
+    -Considerations "LLMNR is only used when DNS resolution fails. On a correctly configured network with working DNS, disabling LLMNR has no functional impact. NetBIOS is required for legacy SMB1 file sharing in very old environments. Modern SMB2/3 does not require NetBIOS." `
+    -Action {
     $DNSClientKey = "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient"
     If (!(Test-Path $DNSClientKey)) { New-Item -Path $DNSClientKey -Force | Out-Null }
     Set-ItemProperty -Path $DNSClientKey -Name "EnableMulticast" -Value 0 -Type DWord
     $adapters = Get-WmiObject Win32_NetworkAdapterConfiguration -ErrorAction SilentlyContinue
     foreach ($adapter in $adapters) { $adapter.SetTcpipNetbios(2) | Out-Null }
-    Write-Host "  Done." -ForegroundColor Green
-    Record-Section "NetworkHardening" "APPLIED"
-} else { Write-Host "  Skipped." -ForegroundColor DarkGray; Record-Section "NetworkHardening" "SKIPPED" }
+}
 
 
 # -----------------------------------------------------------------------------
 # SECTION 13: POWER PLAN
 # -----------------------------------------------------------------------------
-Write-Host "`n[13/22] Power Plan..." -ForegroundColor Yellow
-
-if (Should-Skip "PowerPlan") {
-    Write-Host "  Already completed in previous run. Skipping." -ForegroundColor DarkGray
-    Record-Section "PowerPlan" "RESUMED-SKIP"
-} elseif (Confirm-Section -SectionName "Power Plan" `
+Invoke-Section -Number 13 -Key "PowerPlan" -Title "Power Plan" `
     -Info "Windows power plans control CPU frequency scaling, disk spin-down, display sleep, and other hardware behaviour. The default Balanced plan reduces CPU clock speeds during low-load periods. Ultimate Performance is a hidden plan that keeps CPU at maximum frequency at all times. The script auto-detects whether a battery is present and selects the appropriate plan." `
     -Benefits "Ultimate Performance eliminates CPU frequency scaling latency. High Performance is used on laptops as a compromise between responsiveness and battery life. Battery detection is automatic via WMI Win32_Battery." `
-    -Considerations "Ultimate Performance should never be used on a battery-powered device as it significantly reduces battery life. If a battery is detected, High Performance is applied instead. The powercfg /duplicatescheme command creates a new plan with a random GUID each time if Ultimate Performance does not already exist.") {
-
+    -Considerations "Ultimate Performance should never be used on a battery-powered device as it significantly reduces battery life. If a battery is detected, High Performance is applied instead. The powercfg /duplicatescheme command creates a new plan with a random GUID each time if Ultimate Performance does not already exist." `
+    -Action {
     $IsBattery = (Get-WmiObject Win32_Battery -ErrorAction SilentlyContinue) -ne $null
     if ($IsBattery) {
         $HighPerf = powercfg /list 2>$null | Select-String "High performance"
@@ -910,23 +1101,17 @@ if (Should-Skip "PowerPlan") {
             }
         }
     }
-    Record-Section "PowerPlan" "APPLIED"
-} else { Write-Host "  Skipped." -ForegroundColor DarkGray; Record-Section "PowerPlan" "SKIPPED" }
+}
 
 
 # -----------------------------------------------------------------------------
 # SECTION 14: SCHEDULED TASK CLEANUP
 # -----------------------------------------------------------------------------
-Write-Host "`n[14/22] Scheduled Task Cleanup..." -ForegroundColor Yellow
-
-if (Should-Skip "TaskCleanup") {
-    Write-Host "  Already completed in previous run. Skipping." -ForegroundColor DarkGray
-    Record-Section "TaskCleanup" "RESUMED-SKIP"
-} elseif (Confirm-Section -SectionName "Scheduled Task Cleanup" `
+Invoke-Section -Number 14 -Key "TaskCleanup" -Title "Scheduled Task Cleanup" `
     -Info "Third-party software installers often register scheduled tasks that run in the background without user awareness. SoftLanding is OEM bloatware installed by some laptop manufacturers that manages software promotions. CCleanerSkipUAC allows CCleaner to bypass User Account Control prompts by running with elevated privileges without triggering a UAC dialog." `
     -Benefits "Removing SoftLanding eliminates an unnecessary background process. Removing CCleanerSkipUAC closes a UAC bypass that contradicts the security model. UAC exists to require explicit approval for privilege elevation." `
-    -Considerations "These tasks are removed only if they exist. Safe on any machine regardless of what software is installed. CCleaner will continue to function normally after CCleanerSkipUAC is removed and will simply prompt for UAC approval as it should.") {
-
+    -Considerations "These tasks are removed only if they exist. Safe on any machine regardless of what software is installed. CCleaner will continue to function normally after CCleanerSkipUAC is removed and will simply prompt for UAC approval as it should." `
+    -Action {
     foreach ($task in @("SoftLandingCreativeManagementTask","SoftLandingDeferralTask*","CCleanerSkipUAC*")) {
         $found = Get-ScheduledTask -TaskName $task -ErrorAction SilentlyContinue
         if ($found) {
@@ -934,38 +1119,31 @@ if (Should-Skip "TaskCleanup") {
             Write-Host "  Removed: $task" -ForegroundColor Green
         }
     }
-    Write-Host "  Done." -ForegroundColor Green
-    Record-Section "TaskCleanup" "APPLIED"
-} else { Write-Host "  Skipped." -ForegroundColor DarkGray; Record-Section "TaskCleanup" "SKIPPED" }
+}
 
 
 # -----------------------------------------------------------------------------
 # SECTION 15: SERVICE DEPENDENCIES
 # -----------------------------------------------------------------------------
-Write-Host "`n[15/22] Service Dependencies..." -ForegroundColor Yellow
-
-if (Should-Skip "ServiceDependencies") {
-    Write-Host "  Already completed in previous run. Skipping." -ForegroundColor DarkGray
-    Record-Section "ServiceDependencies" "RESUMED-SKIP"
-} elseif (Confirm-Section -SectionName "Service Dependencies" `
+Invoke-Section -Number 15 -Key "ServiceDependencies" -Title "Service Dependencies" `
     -Info "Hardening scripts can inadvertently disable services that legitimate software depends on. This section checks for and protects three categories: OneDrive sync services (FileSyncHelper and OneSyncSvc), VMware virtualisation services (VMAuthdService), and YubiKey smart card services (SCardSvr and ScDeviceEnum). All checks are conditional and safe on machines without any of this software." `
     -Benefits "Prevents the common failure mode where hardening disables OneDrive sync services causing OneDrive to appear running but not actually syncing. Ensures VMware VMs remain usable. Enables smart card services automatically if YubiKey software is detected." `
-    -Considerations "FileSyncHelper is reset to Automatic if disabled. OneSyncSvc is set to Manual (value 3) rather than Automatic because it is a per-session service. VMAuthdService is only touched if currently Disabled. YubiKey detection uses Get-Package to check for installed YubiKey Manager.") {
-
+    -Considerations "FileSyncHelper is reset to Automatic if disabled. OneSyncSvc is set to Manual (value 3) rather than Automatic because it is a per-session service. VMAuthdService is only touched if currently Disabled. YubiKey detection uses Get-Package to check for installed YubiKey Manager." `
+    -Action {
     foreach ($svc in @("FileSyncHelper","OneSyncSvc")) {
         $s = Get-Service -Name $svc -ErrorAction SilentlyContinue
         if ($s -and $s.StartType -eq "Disabled") {
             $startVal = if ($svc -eq "FileSyncHelper") { 2 } else { 3 }
             Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\$svc" -Name "Start" -Value $startVal -ErrorAction SilentlyContinue
             Start-Service -Name $svc -ErrorAction SilentlyContinue
-            $Warnings += "$svc was Disabled. Reset. OneDrive sync should now work."
+            $script:Warnings += "$svc was Disabled. Reset. OneDrive sync should now work."
         }
     }
     $VMAuth = Get-Service -Name "VMAuthdService" -ErrorAction SilentlyContinue
     if ($VMAuth -and $VMAuth.StartType -eq "Disabled") {
         Set-Service -Name "VMAuthdService" -StartupType Automatic -ErrorAction SilentlyContinue
         Start-Service -Name "VMAuthdService" -ErrorAction SilentlyContinue
-        $Warnings += "VMAuthdService was Disabled. Reset to Automatic."
+        $script:Warnings += "VMAuthdService was Disabled. Reset to Automatic."
     }
     $YubiKeyInstalled = Get-Package -Name "*YubiKey*" -ErrorAction SilentlyContinue
     if ($YubiKeyInstalled) {
@@ -975,9 +1153,7 @@ if (Should-Skip "ServiceDependencies") {
     } else {
         Write-Host "  No YubiKey software detected. Smart Card services unchanged." -ForegroundColor Gray
     }
-    Write-Host "  Done." -ForegroundColor Green
-    Record-Section "ServiceDependencies" "APPLIED"
-} else { Write-Host "  Skipped." -ForegroundColor DarkGray; Record-Section "ServiceDependencies" "SKIPPED" }
+}
 
 
 # -----------------------------------------------------------------------------
@@ -1007,16 +1183,11 @@ if (Should-Skip "ServiceDependencies") {
 #   categories: logon/logoff, account logon, privilege use, and policy change.
 #   This is a deliberate minimal baseline, not a full audit configuration.
 # -----------------------------------------------------------------------------
-Write-Host "`n[16/22] Audit Policy Baseline..." -ForegroundColor Yellow
-
-if (Should-Skip "AuditPolicy") {
-    Write-Host "  Already completed in previous run. Skipping." -ForegroundColor DarkGray
-    Record-Section "AuditPolicy" "RESUMED-SKIP"
-} elseif (Confirm-Section -SectionName "Audit Policy Baseline" `
+Invoke-Section -Number 16 -Key "AuditPolicy" -Title "Audit Policy Baseline" `
     -Info "Windows audit policy controls what security events are written to the Security Event Log. By default most audit categories are disabled, meaning minimal forensic visibility into what happens on the machine. A basic audit baseline covers logon events, privilege use, and policy changes." `
     -Benefits "Provides forensic visibility that is currently a known gap. If an account is compromised or unusual privilege escalation occurs, the audit log gives you something to investigate. Logon event auditing captures failed login attempts useful for detecting brute force attempts on local accounts." `
-    -Considerations "Audit logging increases Security Event Log size over time. The default log size may need increasing if the machine is very active. This section enables only the most useful categories as a minimal baseline: logon/logoff, account logon, privilege use, and policy change.") {
-
+    -Considerations "Audit logging increases Security Event Log size over time. The default log size may need increasing if the machine is very active. This section enables only the most useful categories as a minimal baseline: logon/logoff, account logon, privilege use, and policy change." `
+    -Action {
     # Enable basic audit categories via auditpol
     auditpol /set /subcategory:"Logon" /success:enable /failure:enable 2>$null
     auditpol /set /subcategory:"Logoff" /success:enable 2>$null
@@ -1030,8 +1201,7 @@ if (Should-Skip "AuditPolicy") {
 
     Write-Host "  Audit policy baseline applied." -ForegroundColor Green
     Write-Host "  Categories enabled: Logon, Logoff, Account Lockout, Privilege Use, Policy Change, Account Management." -ForegroundColor Gray
-    Record-Section "AuditPolicy" "APPLIED"
-} else { Write-Host "  Skipped." -ForegroundColor DarkGray; Record-Section "AuditPolicy" "SKIPPED" }
+}
 
 
 # -----------------------------------------------------------------------------
@@ -1053,59 +1223,68 @@ if (Should-Skip "AuditPolicy") {
 #   just the browser, closing the gap left by browser-only DoH settings.
 #
 # CONSIDERATIONS APPLYING:
-#   System-wide DoH is configured via registry under the DnsCache service.
-#   The DoH server URL must be pre-registered in the Windows DoH server list
-#   or added manually. Cloudflare (1.1.1.1) and Google (8.8.8.8) are both
-#   pre-registered in Windows 11. A reboot is required for this to take full
-#   effect. This setting does not affect applications that implement their
-#   own DNS resolution stack (some corporate VPN clients do this).
-#   If the machine is on a corporate network with internal DNS, enabling
-#   system-wide DoH may break internal name resolution. Check with the
-#   network team before applying in an enterprise environment.
+#   Windows 11 exposes OS-level DoH through the DnsClient cmdlets
+#   (Add-DnsClientDohServerAddress, the same thing "netsh dns add encryption"
+#   does) and the "Configure DNS over HTTPS" group policy, stored as DoHPolicy
+#   under HKLM\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient. This section
+#   registers Cloudflare 1.1.1.1 and 1.0.0.1 with their template and
+#   auto-upgrade enabled, sets DoHPolicy to 2 (Allow: upgrade to DoH where the
+#   server has a template, plaintext otherwise), and points every active
+#   physical adapter at those servers. Windows 10 has no supported OS-level
+#   DoH; the cmdlets are absent there and the section records a warning.
+#   Plaintext fallback stays enabled so captive portals (hotel and cafe wifi)
+#   still work; change AllowFallbackToUdp to $false below for a stricter
+#   setup. This does not affect applications that implement their own DNS
+#   stack (some VPN clients). On a corporate network with internal DNS,
+#   pointing adapters at Cloudflare breaks internal name resolution.
+#   Confirm the result after a reboot with: netsh dns show encryption
 # -----------------------------------------------------------------------------
-Write-Host "`n[17/22] DNS over HTTPS (System-wide)..." -ForegroundColor Yellow
-
-if (Should-Skip "DoH") {
-    Write-Host "  Already completed in previous run. Skipping." -ForegroundColor DarkGray
-    Record-Section "DoH" "RESUMED-SKIP"
-} elseif (Confirm-Section -SectionName "DNS over HTTPS (System-wide)" `
+Invoke-Section -Number 17 -Key "DoH" -Title "DNS over HTTPS (System-wide)" `
     -Info "By default Windows resolves DNS queries in plaintext, meaning your ISP or network operator can see every domain you visit. Windows 11 supports DNS over HTTPS natively at the OS level, encrypting DNS queries before they leave the machine. This is separate from browser-level DoH settings and applies to all applications." `
     -Benefits "Encrypts all DNS queries from the OS, not just the browser. Prevents ISP or local network from logging DNS queries. Uses Cloudflare 1.1.1.1 which has a strong privacy policy. Applies to every application on the machine closing the gap left by browser-only DoH." `
-    -Considerations "A reboot is required for full effect. If the machine is on a corporate network with internal DNS, enabling system-wide DoH may break internal name resolution. Check with the network team before applying in an enterprise environment. Does not affect apps with their own DNS implementation.") {
+    -Considerations "Windows 11 only (Windows 10 has no supported OS-level DoH; a warning is recorded instead). Registers Cloudflare with auto-upgrade and sets the DoH policy to Allow, with plaintext fallback kept so captive portals still work. A reboot is recommended; confirm with 'netsh dns show encryption'. If the machine is on a corporate network with internal DNS, pointing adapters at Cloudflare breaks internal name resolution. Check with the network team before applying in an enterprise environment. Does not affect apps with their own DNS implementation." `
+    -Action {
+    if (-not (Get-Command Add-DnsClientDohServerAddress -ErrorAction SilentlyContinue)) {
+        Write-Host "  OS-level DoH cmdlets not present (Windows 10). Not applied; use browser DoH instead." -ForegroundColor Yellow
+        $script:Warnings += "Section 17: OS-level DNS over HTTPS requires Windows 11. Not applied."
+        return
+    }
 
-    # Set DoH policy for Cloudflare 1.1.1.1
-    $DoHKey = "HKLM:\SYSTEM\CurrentControlSet\Services\Dnscache\Parameters"
-    Set-ItemProperty -Path $DoHKey -Name "EnableAutoDoh" -Value 2 -Type DWord -ErrorAction SilentlyContinue
+    # Register Cloudflare resolvers with their DoH template and automatic upgrade to DoH
+    foreach ($Server in @("1.1.1.1","1.0.0.1")) {
+        $Params = @{ ServerAddress = $Server; DohTemplate = "https://cloudflare-dns.com/dns-query"; AutoUpgrade = $true; AllowFallbackToUdp = $true; ErrorAction = "SilentlyContinue" }
+        if (Get-DnsClientDohServerAddress -ServerAddress $Server -ErrorAction SilentlyContinue) {
+            Set-DnsClientDohServerAddress @Params | Out-Null
+        } else {
+            Add-DnsClientDohServerAddress @Params | Out-Null
+        }
+    }
 
-    # Register Cloudflare DoH server
-    $CloudflareDoH = "HKLM:\SYSTEM\CurrentControlSet\Services\Dnscache\Parameters\DohWellKnownServers\1.1.1.1"
-    If (!(Test-Path $CloudflareDoH)) { New-Item -Path $CloudflareDoH -Force | Out-Null }
-    Set-ItemProperty -Path $CloudflareDoH -Name "DohFlags" -Value 1 -Type DWord -ErrorAction SilentlyContinue
-    Set-ItemProperty -Path $CloudflareDoH -Name "Template" -Value "https://cloudflare-dns.com/dns-query" -Type String -ErrorAction SilentlyContinue
+    # Policy 2 = Allow DoH. 3 (Require) would break resolution on any adapter that later
+    # receives a DNS server without a registered template, e.g. a VPN or a new wifi network.
+    $DNSClientKey = "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient"
+    If (!(Test-Path $DNSClientKey)) { New-Item -Path $DNSClientKey -Force | Out-Null }
+    Set-ItemProperty -Path $DNSClientKey -Name "DoHPolicy" -Value 2 -Type DWord
 
     $ActivePhysicalAdapters = Get-NetAdapter -Physical -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq "Up" }
     foreach ($Adapter in $ActivePhysicalAdapters) {
         Set-DnsClientServerAddress -InterfaceIndex $Adapter.InterfaceIndex -ServerAddresses ("1.1.1.1","1.0.0.1") -ErrorAction SilentlyContinue
     }
+    Clear-DnsClientCache -ErrorAction SilentlyContinue
 
-    Write-Host "  DoH configured. Using Cloudflare 1.1.1.1. Reboot required to take full effect." -ForegroundColor Green
-    Record-Section "DoH" "APPLIED"
-} else { Write-Host "  Skipped." -ForegroundColor DarkGray; Record-Section "DoH" "SKIPPED" }
+    Write-Host "  DoH configured: Cloudflare registered with auto-upgrade, DoHPolicy=Allow, active adapters set." -ForegroundColor Green
+    Write-Host "  Reboot, then confirm with: netsh dns show encryption" -ForegroundColor Gray
+}
 
 
 # -----------------------------------------------------------------------------
 # SECTION 18: CORTANA AND WEB SEARCH
 # -----------------------------------------------------------------------------
-Write-Host "`n[18/22] Cortana and Web Search..." -ForegroundColor Yellow
-
-if (Should-Skip "Cortana") {
-    Write-Host "  Already completed in previous run. Skipping." -ForegroundColor DarkGray
-    Record-Section "Cortana" "RESUMED-SKIP"
-} elseif (Confirm-Section -SectionName "Cortana and Web Search" `
+Invoke-Section -Number 18 -Key "Cortana" -Title "Cortana and Web Search" `
     -Info "Cortana is Microsoft's voice assistant. Even when not used it runs in the background and integrates with Windows Search, sending search queries and partial keystrokes from the Start menu to Bing/Microsoft. The Start menu search box returns web results from Bing by default, meaning anything typed there leaves the machine." `
     -Benefits "Setting AllowCortana to 0 disables Cortana entirely via policy. Disabling web search and connected search stops the Start menu sending typed queries to Bing, keeping local searches local. Reduces background activity and a constant outbound query channel. Appropriate for an office laptop where the assistant is not used." `
-    -Considerations "Applied via Group Policy registry keys (machine-wide) plus a per-user Bing toggle. Start menu search for installed apps and local files still works. Web answers in the Start menu will no longer appear. On managed devices an Intune/GPO policy may re-assert Cortana settings after reboot.") {
-
+    -Considerations "Applied via Group Policy registry keys (machine-wide) plus a per-user Bing toggle. Start menu search for installed apps and local files still works. Web answers in the Start menu will no longer appear. On managed devices an Intune/GPO policy may re-assert Cortana settings after reboot." `
+    -Action {
     $SearchPolicyKey = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search"
     If (!(Test-Path $SearchPolicyKey)) { New-Item -Path $SearchPolicyKey -Force | Out-Null }
     Set-ItemProperty -Path $SearchPolicyKey -Name "AllowCortana" -Value 0 -Type DWord
@@ -1113,62 +1292,49 @@ if (Should-Skip "Cortana") {
     Set-ItemProperty -Path $SearchPolicyKey -Name "ConnectedSearchUseWeb" -Value 0 -Type DWord
     Set-ItemProperty -Path $SearchPolicyKey -Name "AllowSearchToUseLocation" -Value 0 -Type DWord
 
-    # Per-user Bing/Cortana toggles for the account running the script
-    $UserSearchKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Search"
-    If (!(Test-Path $UserSearchKey)) { New-Item -Path $UserSearchKey -Force | Out-Null }
-    Set-ItemProperty -Path $UserSearchKey -Name "BingSearchEnabled" -Value 0 -Type DWord -ErrorAction SilentlyContinue
-    Set-ItemProperty -Path $UserSearchKey -Name "CortanaConsent" -Value 0 -Type DWord -ErrorAction SilentlyContinue
+    # Per-user Bing/Cortana toggles for every profile on the machine
+    Invoke-ForEachUserHive {
+        param($Root, $Hive)
+        $UserSearchKey = "$Root\Software\Microsoft\Windows\CurrentVersion\Search"
+        If (!(Test-Path $UserSearchKey)) { New-Item -Path $UserSearchKey -Force | Out-Null }
+        Set-ItemProperty -Path $UserSearchKey -Name "BingSearchEnabled" -Value 0 -Type DWord -ErrorAction SilentlyContinue
+        Set-ItemProperty -Path $UserSearchKey -Name "CortanaConsent" -Value 0 -Type DWord -ErrorAction SilentlyContinue
+    }
 
     # On Windows 11 the AllowCortana policy is deprecated and Cortana ships as a
-    # standalone Store app. Remove the app package (user + provisioned) so it is
-    # actually gone, not merely policy-disabled.
-    Get-AppxPackage -Name "Microsoft.549981C3F5F10" -ErrorAction SilentlyContinue |
-        ForEach-Object { Remove-AppxPackage -Package $_.PackageFullName -ErrorAction SilentlyContinue }
+    # standalone Store app. Remove the app package (all users + provisioned) so it
+    # is actually gone, not merely policy-disabled.
+    Get-AppxPackage -AllUsers -Name "Microsoft.549981C3F5F10" -ErrorAction SilentlyContinue |
+        ForEach-Object { Remove-AppxPackage -Package $_.PackageFullName -AllUsers -ErrorAction SilentlyContinue }
     Get-AppxProvisionedPackage -Online -ErrorAction SilentlyContinue |
         Where-Object { $_.DisplayName -eq "Microsoft.549981C3F5F10" } | ForEach-Object {
             Remove-AppxProvisionedPackage -Online -PackageName $_.PackageName -ErrorAction SilentlyContinue | Out-Null
         }
-
-    Write-Host "  Done." -ForegroundColor Green
-    Record-Section "Cortana" "APPLIED"
-} else { Write-Host "  Skipped." -ForegroundColor DarkGray; Record-Section "Cortana" "SKIPPED" }
+}
 
 
 # -----------------------------------------------------------------------------
 # SECTION 19: LOCAL ACCOUNT SECURITY QUESTIONS
 # -----------------------------------------------------------------------------
-Write-Host "`n[19/22] Local Account Security Questions..." -ForegroundColor Yellow
-
-if (Should-Skip "SecurityQuestions") {
-    Write-Host "  Already completed in previous run. Skipping." -ForegroundColor DarkGray
-    Record-Section "SecurityQuestions" "RESUMED-SKIP"
-} elseif (Confirm-Section -SectionName "Local Account Security Questions" `
+Invoke-Section -Number 19 -Key "SecurityQuestions" -Title "Local Account Security Questions" `
     -Info "When a local account is created or its password changed, Windows prompts for three security questions and stores the answers locally. These answers act as an offline password-reset backdoor: anyone who can guess them (or who finds them written down) can reset the local account password from the login screen without knowing the current one. The questions are drawn from a fixed list and answers are often weak (pet name, first school)." `
     -Benefits "Setting NoLocalPasswordResetQuestions to 1 removes the security-question prompt and disables the reset-via-questions path. Eliminates a low-effort local-account compromise vector that bypasses the actual password. Recommended on any device that does not rely on this offline reset mechanism." `
-    -Considerations "Applies to LOCAL accounts only. Microsoft accounts and Azure AD/Entra accounts reset via Microsoft's online flow and are unaffected. After applying, if a local account password is genuinely forgotten there is no security-question reset path, so ensure another recovery route exists (a second admin account, or a recorded password in your password manager).") {
-
+    -Considerations "Applies to LOCAL accounts only. Microsoft accounts and Azure AD/Entra accounts reset via Microsoft's online flow and are unaffected. After applying, if a local account password is genuinely forgotten there is no security-question reset path, so ensure another recovery route exists (a second admin account, or a recorded password in your password manager)." `
+    -Action {
     $SystemPolicyKey = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\System"
     If (!(Test-Path $SystemPolicyKey)) { New-Item -Path $SystemPolicyKey -Force | Out-Null }
     Set-ItemProperty -Path $SystemPolicyKey -Name "NoLocalPasswordResetQuestions" -Value 1 -Type DWord
-
-    Write-Host "  Done." -ForegroundColor Green
-    Record-Section "SecurityQuestions" "APPLIED"
-} else { Write-Host "  Skipped." -ForegroundColor DarkGray; Record-Section "SecurityQuestions" "SKIPPED" }
+}
 
 
 # -----------------------------------------------------------------------------
 # SECTION 20: CONSUMER BLOATWARE REMOVAL
 # -----------------------------------------------------------------------------
-Write-Host "`n[20/22] Consumer Bloatware Removal..." -ForegroundColor Yellow
-
-if (Should-Skip "Bloatware") {
-    Write-Host "  Already completed in previous run. Skipping." -ForegroundColor DarkGray
-    Record-Section "Bloatware" "RESUMED-SKIP"
-} elseif (Confirm-Section -SectionName "Consumer Bloatware Removal" `
+Invoke-Section -Number 20 -Key "Bloatware" -Title "Consumer Bloatware Removal" `
     -Info "A default Windows install ships with consumer Store apps that have no place on a business laptop: the Xbox suite, LinkedIn, Bing News and Weather, Solitaire, Clipchamp, Groove Music and Movies, the 3D apps, Skype, Maps, Phone Link, the consumer Teams 'Chat' stub, plus Get Help, Tips, Feedback Hub, Mixed Reality Portal and People. Several of these run background processes and report usage." `
     -Benefits "Removing these reduces the attack surface, background telemetry, and disk footprint. Each app is removed for the current user AND deprovisioned from the Windows image, so it does not reinstall for newly created user profiles or get re-added by feature updates. Work apps (Microsoft 365, Teams for work, Company Portal) are not touched." `
-    -Considerations "Removal is not reversible via the registry rollback - reinstall any app from the Microsoft Store if it is later needed. The consumer Teams 'Chat' app (package MicrosoftTeams) is removed; Teams for work/school installed via Microsoft 365 is a separate product and is NOT affected. Phone Link (YourPhone) is removed per your selection. If a package is already absent the script silently continues.") {
-
+    -Considerations "Removal is not reversible via the registry rollback - reinstall any app from the Microsoft Store if it is later needed. The consumer Teams 'Chat' app (package MicrosoftTeams) is removed; Teams for work/school installed via Microsoft 365 is a separate product and is NOT affected. Phone Link (YourPhone) is removed per your selection. If a package is already absent the script silently continues." `
+    -Action {
     $AppsToRemove = @(
         "Microsoft.XboxApp","Microsoft.GamingApp","Microsoft.XboxGamingOverlay","Microsoft.XboxGameOverlay",
         "Microsoft.XboxSpeechToTextOverlay","Microsoft.XboxIdentityProvider","Microsoft.Xbox.TCUI",
@@ -1181,40 +1347,34 @@ if (Should-Skip "Bloatware") {
     )
 
     $RemovedCount = 0
+    $Provisioned = @(Get-AppxProvisionedPackage -Online -ErrorAction SilentlyContinue)
     foreach ($App in $AppsToRemove) {
-        # Remove installed package for the current user
-        $Installed = Get-AppxPackage -Name $App -ErrorAction SilentlyContinue
+        # Remove installed package for every user on the machine
+        $Installed = Get-AppxPackage -AllUsers -Name $App -ErrorAction SilentlyContinue
         if ($Installed) {
-            $Installed | ForEach-Object { Remove-AppxPackage -Package $_.PackageFullName -ErrorAction SilentlyContinue }
-            Write-Host "  Removed (user): $App" -ForegroundColor Green
+            $Installed | ForEach-Object { Remove-AppxPackage -Package $_.PackageFullName -AllUsers -ErrorAction SilentlyContinue }
+            Write-Host "  Removed (all users): $App" -ForegroundColor Green
             $RemovedCount++
         }
         # Deprovision from the image so it does not return for new profiles or after updates
-        Get-AppxProvisionedPackage -Online -ErrorAction SilentlyContinue |
-            Where-Object { $_.DisplayName -eq $App } | ForEach-Object {
-                Remove-AppxProvisionedPackage -Online -PackageName $_.PackageName -ErrorAction SilentlyContinue | Out-Null
-                Write-Host "  Deprovisioned: $App" -ForegroundColor Green
-            }
+        $Provisioned | Where-Object { $_.DisplayName -eq $App } | ForEach-Object {
+            Remove-AppxProvisionedPackage -Online -PackageName $_.PackageName -ErrorAction SilentlyContinue | Out-Null
+            Write-Host "  Deprovisioned: $App" -ForegroundColor Green
+        }
     }
 
-    Write-Host "  Bloatware pass complete. $RemovedCount app(s) removed for current user." -ForegroundColor Green
-    Record-Section "Bloatware" "APPLIED"
-} else { Write-Host "  Skipped." -ForegroundColor DarkGray; Record-Section "Bloatware" "SKIPPED" }
+    Write-Host "  Bloatware pass complete. $RemovedCount app(s) removed." -ForegroundColor Green
+}
 
 
 # -----------------------------------------------------------------------------
 # SECTION 21: CONSUMER EXPERIENCES, ADS AND SUGGESTED CONTENT
 # -----------------------------------------------------------------------------
-Write-Host "`n[21/22] Consumer Experiences, Ads and Suggestions..." -ForegroundColor Yellow
-
-if (Should-Skip "ConsumerExperiences") {
-    Write-Host "  Already completed in previous run. Skipping." -ForegroundColor DarkGray
-    Record-Section "ConsumerExperiences" "RESUMED-SKIP"
-} elseif (Confirm-Section -SectionName "Consumer Experiences, Ads and Suggested Content" `
+Invoke-Section -Number 21 -Key "ConsumerExperiences" -Title "Consumer Experiences, Ads and Suggested Content" `
     -Info "Windows silently installs promoted third-party apps ('Windows consumer features'), shows suggested apps and ads in the Start menu, displays Spotlight ads and 'fun facts' on the lock screen, assigns every user an advertising ID for cross-app ad tracking, and uses diagnostic data to deliver 'tailored experiences' (targeted tips and ads). The Widgets board and News & Interests feed pull a constant stream of MSN content and trackers." `
     -Benefits "Disabling consumer features stops Windows auto-installing promoted apps. Turning off suggested content, Spotlight, and the advertising ID removes in-OS advertising and a cross-app tracking identifier. Disabling tailored experiences stops diagnostic data being used to target you. Disabling Widgets/News removes the MSN content and tracking surface. A cleaner, quieter, ad-free office desktop." `
-    -Considerations "Machine-wide ad/consumer settings are policy keys; per-user suggestion toggles apply to the account running the script. The Start menu and lock screen will show no suggestions or Spotlight imagery (a static lock screen image remains). Widgets are disabled per your selection. None of this affects legitimate work apps or notifications.") {
-
+    -Considerations "Machine-wide ad/consumer settings are policy keys; per-user suggestion toggles apply to the account running the script. The Start menu and lock screen will show no suggestions or Spotlight imagery (a static lock screen image remains). Widgets are disabled per your selection. None of this affects legitimate work apps or notifications." `
+    -Action {
     # Stop auto-installed promoted apps and Spotlight ads (machine policy)
     $CloudContentKey = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent"
     If (!(Test-Path $CloudContentKey)) { New-Item -Path $CloudContentKey -Force | Out-Null }
@@ -1223,40 +1383,36 @@ if (Should-Skip "ConsumerExperiences") {
     Set-ItemProperty -Path $CloudContentKey -Name "DisableSoftLanding" -Value 1 -Type DWord
     Set-ItemProperty -Path $CloudContentKey -Name "DisableWindowsSpotlightFeatures" -Value 1 -Type DWord
 
-    # Advertising ID off (machine policy + per-user value)
+    # Advertising ID off (machine policy)
     $AdvInfoPolicy = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\AdvertisingInfo"
     If (!(Test-Path $AdvInfoPolicy)) { New-Item -Path $AdvInfoPolicy -Force | Out-Null }
     Set-ItemProperty -Path $AdvInfoPolicy -Name "DisabledByGroupPolicy" -Value 1 -Type DWord
-    $AdvInfoUser = "HKCU:\Software\Microsoft\Windows\CurrentVersion\AdvertisingInfo"
-    If (!(Test-Path $AdvInfoUser)) { New-Item -Path $AdvInfoUser -Force | Out-Null }
-    Set-ItemProperty -Path $AdvInfoUser -Name "Enabled" -Value 0 -Type DWord -ErrorAction SilentlyContinue
 
-    # Tailored experiences with diagnostic data off (per-user)
-    $PrivacyKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Privacy"
-    If (!(Test-Path $PrivacyKey)) { New-Item -Path $PrivacyKey -Force | Out-Null }
-    Set-ItemProperty -Path $PrivacyKey -Name "TailoredExperiencesWithDiagnosticDataEnabled" -Value 0 -Type DWord -ErrorAction SilentlyContinue
+    # Per-user toggles for every profile: advertising ID, tailored experiences,
+    # Start menu / lock screen suggestions and Spotlight (ContentDeliveryManager)
+    $CDMValues = ($UserRegistryRollbackTargets | Where-Object { $_.Name -eq "UserContentDelivery" }).Values
+    Invoke-ForEachUserHive {
+        param($Root, $Hive)
+        $AdvInfoUser = "$Root\Software\Microsoft\Windows\CurrentVersion\AdvertisingInfo"
+        If (!(Test-Path $AdvInfoUser)) { New-Item -Path $AdvInfoUser -Force | Out-Null }
+        Set-ItemProperty -Path $AdvInfoUser -Name "Enabled" -Value 0 -Type DWord -ErrorAction SilentlyContinue
 
-    # Start menu / lock screen suggestions and Spotlight (per-user ContentDeliveryManager)
-    $CDMKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager"
-    If (!(Test-Path $CDMKey)) { New-Item -Path $CDMKey -Force | Out-Null }
-    foreach ($v in @(
-        "SilentInstalledAppsEnabled","SystemPaneSuggestionsEnabled","SoftLandingEnabled",
-        "RotatingLockScreenEnabled","RotatingLockScreenOverlayEnabled","SubscribedContentEnabled",
-        "SubscribedContent-338387Enabled","SubscribedContent-338388Enabled","SubscribedContent-338389Enabled",
-        "SubscribedContent-338393Enabled","SubscribedContent-353694Enabled","SubscribedContent-353696Enabled",
-        "SubscribedContent-310093Enabled","OemPreInstalledAppsEnabled","PreInstalledAppsEnabled"
-    )) {
-        Set-ItemProperty -Path $CDMKey -Name $v -Value 0 -Type DWord -ErrorAction SilentlyContinue
+        $PrivacyKey = "$Root\Software\Microsoft\Windows\CurrentVersion\Privacy"
+        If (!(Test-Path $PrivacyKey)) { New-Item -Path $PrivacyKey -Force | Out-Null }
+        Set-ItemProperty -Path $PrivacyKey -Name "TailoredExperiencesWithDiagnosticDataEnabled" -Value 0 -Type DWord -ErrorAction SilentlyContinue
+
+        $CDMKey = "$Root\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager"
+        If (!(Test-Path $CDMKey)) { New-Item -Path $CDMKey -Force | Out-Null }
+        foreach ($v in $CDMValues) {
+            Set-ItemProperty -Path $CDMKey -Name $v -Value 0 -Type DWord -ErrorAction SilentlyContinue
+        }
     }
 
     # Widgets / News and Interests off (machine policy)
     $DshKey = "HKLM:\SOFTWARE\Policies\Microsoft\Dsh"
     If (!(Test-Path $DshKey)) { New-Item -Path $DshKey -Force | Out-Null }
     Set-ItemProperty -Path $DshKey -Name "AllowNewsAndInterests" -Value 0 -Type DWord
-
-    Write-Host "  Done." -ForegroundColor Green
-    Record-Section "ConsumerExperiences" "APPLIED"
-} else { Write-Host "  Skipped." -ForegroundColor DarkGray; Record-Section "ConsumerExperiences" "SKIPPED" }
+}
 
 
 # -----------------------------------------------------------------------------
@@ -1271,30 +1427,14 @@ if (Should-Skip "ConsumerExperiences") {
 #   Feedback sampling that periodically prompts for and uploads feedback,
 #   and online speech / inking-and-typing data collection.
 # -----------------------------------------------------------------------------
-Write-Host "`n[22/22] Additional Telemetry and Tracking Hardening..." -ForegroundColor Yellow
-
-if (Should-Skip "ExtraTelemetry") {
-    Write-Host "  Already completed in previous run. Skipping." -ForegroundColor DarkGray
-    Record-Section "ExtraTelemetry" "RESUMED-SKIP"
-} elseif (Confirm-Section -SectionName "Additional Telemetry and Tracking Hardening" `
+Invoke-Section -Number 22 -Key "ExtraTelemetry" -Title "Additional Telemetry and Tracking Hardening" `
     -Info "Beyond the main DiagTrack telemetry service (Section 4), Windows still collects data through other channels: CEIP scheduled tasks, the Application Compatibility Appraiser and Inventory collector (which inventories your installed software and sends it to Microsoft), Windows Feedback sampling, and online speech recognition plus inking/typing data collection. These run independently of the telemetry level setting." `
     -Benefits "Disables CEIP and Application Experience scheduled tasks, turns off the compatibility Appraiser/Inventory collector via policy, sets feedback frequency to zero so the OS stops prompting and uploading feedback, and disables online speech recognition and inking/typing data sharing. Closes the residual tracking channels left open after Section 4 for a quieter, lower-egress office build." `
-    -Considerations "Disabling the Application Compatibility Appraiser means Microsoft will not receive app-compatibility data; this has no day-to-day impact but is occasionally used to flag known-incompatible apps before a feature update. Online speech recognition (dictation via Microsoft's cloud) is disabled; locally-processed speech still works where supported. All changes are machine/user policy and are captured for rollback where they are HKLM policy keys.") {
-
-    # Disable telemetry / CEIP / feedback scheduled tasks
-    $TelemetryTasks = @(
-        "\Microsoft\Windows\Application Experience\Microsoft Compatibility Appraiser",
-        "\Microsoft\Windows\Application Experience\ProgramDataUpdater",
-        "\Microsoft\Windows\Application Experience\StartupAppTask",
-        "\Microsoft\Windows\Customer Experience Improvement Program\Consolidator",
-        "\Microsoft\Windows\Customer Experience Improvement Program\UsbCeip",
-        "\Microsoft\Windows\Customer Experience Improvement Program\KernelCeipTask",
-        "\Microsoft\Windows\Autochk\Proxy",
-        "\Microsoft\Windows\Feedback\Siuf\DmClient",
-        "\Microsoft\Windows\Feedback\Siuf\DmClientOnScenarioDownload",
-        "\Microsoft\Windows\DiskDiagnostic\Microsoft-Windows-DiskDiagnosticDataCollector"
-    )
-    foreach ($TaskPath in $TelemetryTasks) {
+    -Considerations "Disabling the Application Compatibility Appraiser means Microsoft will not receive app-compatibility data; this has no day-to-day impact but is occasionally used to flag known-incompatible apps before a feature update. Online speech recognition (dictation via Microsoft's cloud) is disabled; locally-processed speech still works where supported. All changes are machine/user policy and are captured for rollback where they are HKLM policy keys." `
+    -Action {
+    # Disable telemetry / CEIP / feedback scheduled tasks (list defined with the
+    # rollback targets near the top of the script so their pre-run state is captured)
+    foreach ($TaskPath in $TelemetryTaskPaths) {
         $Leaf   = Split-Path $TaskPath -Leaf
         $Folder = (Split-Path $TaskPath -Parent) + "\"
         $t = Get-ScheduledTask -TaskName $Leaf -TaskPath $Folder -ErrorAction SilentlyContinue
@@ -1311,31 +1451,33 @@ if (Should-Skip "ExtraTelemetry") {
     Set-ItemProperty -Path $AppCompatKey -Name "DisableInventory" -Value 1 -Type DWord
     Set-ItemProperty -Path $AppCompatKey -Name "DisableUAR" -Value 1 -Type DWord
 
-    # Windows Feedback frequency to zero (per-user)
-    $SiufKey = "HKCU:\Software\Microsoft\Siuf\Rules"
-    If (!(Test-Path $SiufKey)) { New-Item -Path $SiufKey -Force | Out-Null }
-    Set-ItemProperty -Path $SiufKey -Name "NumberOfSIUFInPeriod" -Value 0 -Type DWord -ErrorAction SilentlyContinue
-    Remove-ItemProperty -Path $SiufKey -Name "PeriodInNanoSeconds" -ErrorAction SilentlyContinue
-
-    # Online speech recognition off (machine policy + per-user consent)
+    # Online speech recognition off (machine policy)
     $SpeechPolicyKey = "HKLM:\SOFTWARE\Policies\Microsoft\Speech"
     If (!(Test-Path $SpeechPolicyKey)) { New-Item -Path $SpeechPolicyKey -Force | Out-Null }
     Set-ItemProperty -Path $SpeechPolicyKey -Name "AllowSpeechModelUpdate" -Value 0 -Type DWord -ErrorAction SilentlyContinue
-    $SpeechConsentKey = "HKCU:\Software\Microsoft\Speech_OneCore\Settings\OnlineSpeechPrivacy"
-    If (!(Test-Path $SpeechConsentKey)) { New-Item -Path $SpeechConsentKey -Force | Out-Null }
-    Set-ItemProperty -Path $SpeechConsentKey -Name "HasAccepted" -Value 0 -Type DWord -ErrorAction SilentlyContinue
 
-    # Inking and typing personalisation / data sharing off (per-user)
-    $TipcKey = "HKCU:\Software\Microsoft\Input\TIPC"
-    If (!(Test-Path $TipcKey)) { New-Item -Path $TipcKey -Force | Out-Null }
-    Set-ItemProperty -Path $TipcKey -Name "Enabled" -Value 0 -Type DWord -ErrorAction SilentlyContinue
-    $PersonalizationKey = "HKCU:\Software\Microsoft\Personalization\Settings"
-    If (!(Test-Path $PersonalizationKey)) { New-Item -Path $PersonalizationKey -Force | Out-Null }
-    Set-ItemProperty -Path $PersonalizationKey -Name "AcceptedPrivacyPolicy" -Value 0 -Type DWord -ErrorAction SilentlyContinue
+    # Per-user for every profile: feedback frequency to zero, online speech consent off,
+    # inking and typing personalisation / data sharing off
+    Invoke-ForEachUserHive {
+        param($Root, $Hive)
+        $SiufKey = "$Root\Software\Microsoft\Siuf\Rules"
+        If (!(Test-Path $SiufKey)) { New-Item -Path $SiufKey -Force | Out-Null }
+        Set-ItemProperty -Path $SiufKey -Name "NumberOfSIUFInPeriod" -Value 0 -Type DWord -ErrorAction SilentlyContinue
+        Remove-ItemProperty -Path $SiufKey -Name "PeriodInNanoSeconds" -ErrorAction SilentlyContinue
 
-    Write-Host "  Done." -ForegroundColor Green
-    Record-Section "ExtraTelemetry" "APPLIED"
-} else { Write-Host "  Skipped." -ForegroundColor DarkGray; Record-Section "ExtraTelemetry" "SKIPPED" }
+        $SpeechConsentKey = "$Root\Software\Microsoft\Speech_OneCore\Settings\OnlineSpeechPrivacy"
+        If (!(Test-Path $SpeechConsentKey)) { New-Item -Path $SpeechConsentKey -Force | Out-Null }
+        Set-ItemProperty -Path $SpeechConsentKey -Name "HasAccepted" -Value 0 -Type DWord -ErrorAction SilentlyContinue
+
+        $TipcKey = "$Root\Software\Microsoft\Input\TIPC"
+        If (!(Test-Path $TipcKey)) { New-Item -Path $TipcKey -Force | Out-Null }
+        Set-ItemProperty -Path $TipcKey -Name "Enabled" -Value 0 -Type DWord -ErrorAction SilentlyContinue
+
+        $PersonalizationKey = "$Root\Software\Microsoft\Personalization\Settings"
+        If (!(Test-Path $PersonalizationKey)) { New-Item -Path $PersonalizationKey -Force | Out-Null }
+        Set-ItemProperty -Path $PersonalizationKey -Name "AcceptedPrivacyPolicy" -Value 0 -Type DWord -ErrorAction SilentlyContinue
+    }
+}
 
 
 } finally {
@@ -1412,38 +1554,45 @@ else { Write-Host "  OK: Xbox bloatware removed for current user" -ForegroundCol
 if (Test-Path "C:\hiberfil.sys") { $VerifyFailed += "FAIL: hiberfil.sys still exists. Reboot may be required." }
 else { Write-Host "  OK: Hibernation disabled" -ForegroundColor Green }
 
-$BitLocker = Get-BitLockerVolume -MountPoint "C:" -ErrorAction SilentlyContinue
-if ($BitLocker -and $BitLocker.ProtectionStatus -eq "On") { Write-Host "  OK: BitLocker active on C:" -ForegroundColor Green }
-else { $VerifyFailed += "FAIL: BitLocker is not active on C:. Enable immediately." }
+if (Get-Command Get-BitLockerVolume -ErrorAction SilentlyContinue) {
+    $BitLocker = Get-BitLockerVolume -MountPoint "C:" -ErrorAction SilentlyContinue
+    if ($BitLocker -and $BitLocker.ProtectionStatus -eq "On") { Write-Host "  OK: BitLocker active on C:" -ForegroundColor Green }
+    else { $VerifyFailed += "FAIL: BitLocker is not active on C:. Enable immediately." }
+} else {
+    # Home editions have no BitLocker cmdlets. Device Encryption may still be available.
+    Write-Host "  NOTE: BitLocker cmdlets not available on this edition. Check Settings > Privacy & Security > Device Encryption." -ForegroundColor Yellow
+    $Warnings += "BitLocker not available on this Windows edition. Enable Device Encryption in Settings if the hardware supports it."
+}
 
-$DoHValue = (Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Services\Dnscache\Parameters" -Name "EnableAutoDoh" -ErrorAction SilentlyContinue).EnableAutoDoh
+# DoH: policy set to Allow or Require, Cloudflare registered with auto-upgrade, and an
+# active adapter using it. This confirms configuration; live use is confirmed after a
+# reboot with: netsh dns show encryption
+$DoHPolicy = (Get-ItemProperty "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient" -Name "DoHPolicy" -ErrorAction SilentlyContinue).DoHPolicy
+$DoHServer = if (Get-Command Get-DnsClientDohServerAddress -ErrorAction SilentlyContinue) { Get-DnsClientDohServerAddress -ServerAddress "1.1.1.1" -ErrorAction SilentlyContinue } else { $null }
 $CloudflareDnsActive = $false
 $ActivePhysicalAdapters = Get-NetAdapter -Physical -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq "Up" }
 foreach ($Adapter in $ActivePhysicalAdapters) {
     $DnsServers = (Get-DnsClientServerAddress -InterfaceIndex $Adapter.InterfaceIndex -ErrorAction SilentlyContinue | Where-Object { $_.AddressFamily -eq 2 }).ServerAddresses
     if ($DnsServers -contains "1.1.1.1") { $CloudflareDnsActive = $true }
 }
-if ($DoHValue -eq 2 -and $CloudflareDnsActive) { Write-Host "  OK: DNS over HTTPS enabled with Cloudflare DNS on active physical adapter" -ForegroundColor Green }
-else { $VerifyFailed += "FAIL: DNS over HTTPS/Cloudflare DNS not configured. Reboot may be required or section was skipped." }
-
-$SuspiciousTasks = Get-ScheduledTask | Where-Object {
-    $_.State -ne "Disabled" -and
-    $_.TaskPath -notlike "\Microsoft\*" -and
-    $_.TaskName -notlike "CCleaner*" -and
-    $_.TaskName -notlike "Dropbox*" -and
-    $_.TaskName -notlike "Google*" -and
-    $_.TaskName -notlike "*Winget*" -and
-    $_.TaskName -notlike "*Backup*" -and
-    $_.TaskName -notlike "*Cleanup*" -and
-    $_.TaskName -notlike "NordVPN*" -and
-    $_.TaskName -notlike "*Canon*" -and
-    $_.TaskName -notlike "*Intel*" -and
-    $_.TaskName -notlike "MicrosoftEdge*" -and
-    $_.TaskName -notlike "OneDrive*"
+if (-not (Get-Command Get-DnsClientDohServerAddress -ErrorAction SilentlyContinue)) {
+    Write-Host "  NOTE: OS-level DoH not supported on this Windows version (Windows 11 required)." -ForegroundColor Yellow
+} elseif (($DoHPolicy -eq 2 -or $DoHPolicy -eq 3) -and $DoHServer -and $DoHServer.AutoUpgrade -and $CloudflareDnsActive) {
+    Write-Host "  OK: DoH policy set, Cloudflare registered with auto-upgrade, active adapter using 1.1.1.1" -ForegroundColor Green
+} else {
+    $VerifyFailed += "FAIL: DNS over HTTPS not fully configured (policy=$DoHPolicy, server registered=$([bool]$DoHServer), adapter on 1.1.1.1=$CloudflareDnsActive). Section may have been skipped."
 }
-if ($SuspiciousTasks) {
-    foreach ($t in $SuspiciousTasks) { $VerifyFailed += "REVIEW: Unexpected task: $($t.TaskName) at $($t.TaskPath)" }
-} else { Write-Host "  OK: No unexpected scheduled tasks" -ForegroundColor Green }
+
+# Informational: enabled non-Microsoft scheduled tasks, for the operator to review.
+# Not a verification failure; third-party software legitimately registers tasks.
+$OwnTasks = @("WindowsAdminBackup","WeeklyWingetUpgrade")
+$ThirdPartyTasks = Get-ScheduledTask -ErrorAction SilentlyContinue | Where-Object {
+    $_.State -ne "Disabled" -and $_.TaskPath -notlike "\Microsoft\*" -and $OwnTasks -notcontains $_.TaskName
+}
+if ($ThirdPartyTasks) {
+    Write-Host "  NOTE: Enabled non-Microsoft scheduled tasks (review, nothing changed):" -ForegroundColor Yellow
+    foreach ($t in $ThirdPartyTasks) { Write-Host "    $($t.TaskPath)$($t.TaskName)" -ForegroundColor Gray }
+} else { Write-Host "  OK: No third-party scheduled tasks" -ForegroundColor Green }
 
 if ($VerifyFailed.Count -gt 0) {
     Write-Host "`n  VERIFICATION FAILURES:" -ForegroundColor Red
@@ -1559,42 +1708,60 @@ Write-Progress-Log "Phase 3 backup complete."
 # PHASE 4: REGISTER SCHEDULED TASKS
 #
 # INFO:
-#   Two weekly scheduled tasks are registered. The backup task is now fully
-#   self-contained: it embeds the backup logic directly as a PowerShell
-#   scriptblock saved to the Maintenance-Stuff folder at run time, so no
-#   separate Backup-WindowsAdmin.ps1 file is required. The winget upgrade
-#   task runs every Sunday at 09:00, one hour after the backup task, so
-#   the two do not overlap. Both tasks run as SYSTEM and use
-#   StartWhenAvailable so a missed run fires on next startup.
+#   Two weekly scheduled tasks are registered. The backup task is fully
+#   self-contained: the backup logic is written to a script file at run time,
+#   so no separate Backup-WindowsAdmin.ps1 file is required. The winget
+#   upgrade task runs every Sunday at 09:00, one hour after the backup task,
+#   so the two do not overlap. Both use StartWhenAvailable so a missed run
+#   fires on next startup.
+#
+#   The backup task runs as SYSTEM, so the script it executes must not live
+#   anywhere a standard user (or OneDrive sync from another device) can
+#   write, otherwise anyone who can edit that file gets SYSTEM weekly. It is
+#   therefore written to C:\ProgramData\Maintenance-Stuff with an ACL that
+#   only SYSTEM and Administrators can modify. SYSTEM has no OneDrive
+#   environment, so the backup destination is passed in as an argument.
+#
+#   The winget task runs as the admin account that ran this script, with an
+#   interactive logon type, because winget is a per-user app alias that is
+#   not on SYSTEM's path. It therefore only fires while that user is signed
+#   in; StartWhenAvailable catches up at the next sign-in.
 # =============================================================================
 Write-Host "`n--- PHASE 4: REGISTERING SCHEDULED TASKS ---" -ForegroundColor Cyan
 
 # ---------------------------------------------------------------------------
-# Embed backup logic directly into a script file written at runtime.
-# This makes the portable script fully self-contained with no prerequisites.
+# Embed backup logic directly into a script file written at runtime, in a
+# location that only SYSTEM and Administrators can modify.
 # ---------------------------------------------------------------------------
-$EmbeddedBackupScript = "$ScriptBase\Backup-WindowsAdmin.ps1"
+$SystemScriptDir = "$env:ProgramData\Maintenance-Stuff"
+New-Item -ItemType Directory -Force -Path $SystemScriptDir | Out-Null
+# SIDs rather than names so this works on non-English Windows:
+# S-1-5-18 SYSTEM, S-1-5-32-544 Administrators, S-1-5-32-545 Users
+icacls "$SystemScriptDir" /inheritance:r /grant:r "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F" "*S-1-5-32-545:(OI)(CI)RX" 2>&1 | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    $Warnings += "Could not restrict permissions on $SystemScriptDir. Check its ACL: only SYSTEM and Administrators should be able to write there."
+}
+$EmbeddedBackupScript = "$SystemScriptDir\Backup-WindowsAdmin.ps1"
+
+# Earlier versions of this script placed the file in the user-writable
+# Maintenance-Stuff folder. Remove that copy so nothing runs from there.
+$LegacyBackupScript = "$ScriptBase\Backup-WindowsAdmin.ps1"
+if (Test-Path $LegacyBackupScript) {
+    Remove-Item $LegacyBackupScript -Force -ErrorAction SilentlyContinue
+    Write-Host "  Removed old backup script from user-writable location: $LegacyBackupScript" -ForegroundColor Gray
+}
 
 $BackupScriptContent = @'
 # =============================================================================
 # Backup-WindowsAdmin.ps1 - Auto-generated by Harden-Windows-Portable-Documented.ps1
-# Weekly state backup. Runs every Sunday at 08:00 via scheduled task.
+# Weekly state backup. Runs every Sunday at 08:00 via scheduled task as SYSTEM.
 # Do not delete this file. The WindowsAdminBackup scheduled task calls it directly.
+# The backup destination is passed in by the task; SYSTEM has no OneDrive path.
 # =============================================================================
+param([string]$BackupRoot = "C:\Maintenance-Stuff")
 
-$AdminUser    = $env:USERNAME
-$Date         = Get-Date -Format "yyyy-MM-dd"
-$OneDrivePath = $env:OneDrive
-if (!$OneDrivePath) { $OneDrivePath = $env:OneDriveConsumer }
-if (!$OneDrivePath) { $OneDrivePath = $env:OneDriveCommercial }
-
-if ($OneDrivePath -and (Test-Path $OneDrivePath)) {
-    $ScriptBase = "$OneDrivePath\Documents\Maintenance-Stuff"
-} else {
-    $ScriptBase = "C:\Maintenance-Stuff"
-}
-
-$BackupPath = "$ScriptBase\$Date"
+$Date       = Get-Date -Format "yyyy-MM-dd"
+$BackupPath = "$BackupRoot\$Date"
 New-Item -ItemType Directory -Force -Path $BackupPath | Out-Null
 
 $RegistryExports = @{
@@ -1640,7 +1807,7 @@ $BackupScriptContent | Out-File -FilePath $EmbeddedBackupScript -Encoding UTF8 -
 Write-Host "  Backup script written to: $EmbeddedBackupScript" -ForegroundColor Green
 
 # Register the backup scheduled task pointing to the embedded script
-$BackupAction    = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$EmbeddedBackupScript`""
+$BackupAction    = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$EmbeddedBackupScript`" -BackupRoot `"$BackupRoot`""
 $BackupTrigger   = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Sunday -At "08:00"
 $BackupPrincipal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
 $BackupSettings  = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 30) -MultipleInstances IgnoreNew -StartWhenAvailable
@@ -1650,7 +1817,7 @@ Register-ScheduledTask -TaskName "WindowsAdminBackup" -Description "Weekly state
 if (Get-ScheduledTask -TaskName "WindowsAdminBackup" -ErrorAction SilentlyContinue) {
     Write-Host "  WindowsAdminBackup registered. Runs Sunday 08:00." -ForegroundColor Green
 } else {
-    $Warnings += "WindowsAdminBackup task registration failed."
+    $script:Warnings += "WindowsAdminBackup task registration failed."
     Write-Host "  WARNING: WindowsAdminBackup task registration failed." -ForegroundColor Red
 }
 
@@ -1665,7 +1832,7 @@ Register-ScheduledTask -TaskName "WeeklyWingetUpgrade" -Description "Weekly wing
 if (Get-ScheduledTask -TaskName "WeeklyWingetUpgrade" -ErrorAction SilentlyContinue) {
     Write-Host "  WeeklyWingetUpgrade registered. Runs Sunday 09:00." -ForegroundColor Green
 } else {
-    $Warnings += "WeeklyWingetUpgrade task registration failed."
+    $script:Warnings += "WeeklyWingetUpgrade task registration failed."
 }
 
 Write-Progress-Log "Phase 4 scheduled tasks registered."
@@ -1710,7 +1877,7 @@ if (!(Get-Module -ListAvailable -Name PSWindowsUpdate)) {
         Write-Host "  PSWindowsUpdate installed." -ForegroundColor Green
     } catch {
         Write-Host "  PSWindowsUpdate installation failed. Skipping OS update check." -ForegroundColor Red
-        $Warnings += "PSWindowsUpdate could not be installed. Run Windows Update manually."
+        $script:Warnings += "PSWindowsUpdate could not be installed. Run Windows Update manually."
     }
 }
 
@@ -1727,13 +1894,13 @@ if (Get-Module -ListAvailable -Name PSWindowsUpdate) {
                 ForEach-Object { Write-Host "  Installed: $($_.Title)" -ForegroundColor Green }
             $RebootRequired = (Get-WURebootStatus -Silent)
             if ($RebootRequired) {
-                $Warnings += "Windows updates installed. A reboot is required to complete installation."
+                $script:Warnings += "Windows updates installed. A reboot is required to complete installation."
                 Write-Host "  Reboot required after updates. Do not skip this." -ForegroundColor Yellow
             }
         }
     } catch {
         Write-Host "  Windows Update check failed: $_" -ForegroundColor Red
-        $Warnings += "Windows Update check failed. Run Windows Update manually via Settings."
+        $script:Warnings += "Windows Update check failed. Run Windows Update manually via Settings."
     }
 } else {
     Write-Host "  PSWindowsUpdate not available. Skipping OS update check." -ForegroundColor Yellow
@@ -1747,11 +1914,11 @@ try {
         Write-Host "  Winget upgrade complete." -ForegroundColor Green
     } else {
         Write-Host "  Winget upgrade exited with code $LASTEXITCODE. Run manually: winget upgrade --all" -ForegroundColor Red
-        $Warnings += "Winget upgrade exited with code $LASTEXITCODE. Run manually after script completes."
+        $script:Warnings += "Winget upgrade exited with code $LASTEXITCODE. Run manually after script completes."
     }
 } catch {
     Write-Host "  Winget upgrade failed. Run manually: winget upgrade --all" -ForegroundColor Red
-    $Warnings += "Winget upgrade failed. Run manually after script completes."
+    $script:Warnings += "Winget upgrade failed. Run manually after script completes."
 }
 
 Write-Progress-Log "Phase 5 update check complete."
@@ -1770,12 +1937,14 @@ foreach ($result in $SectionResults) {
         "APPLIED"       { "Green" }
         "SKIPPED"       { "DarkGray" }
         "RESUMED-SKIP"  { "Gray" }
+        "FAILED"        { "Red" }
         default         { "Yellow" }
     }
     $note = switch ($result.Status) {
         "APPLIED"       { "Change applied successfully" }
         "SKIPPED"       { "Operator chose to skip" }
         "RESUMED-SKIP"  { "Already applied in previous run" }
+        "FAILED"        { "Error during section - see warnings" }
         default         { "" }
     }
     Write-Host ("{0,-35} {1,-15} {2}" -f $result.Section, $result.Status, $note) -ForegroundColor $colour
@@ -1810,7 +1979,7 @@ Write-Progress-Log "=== Hardening run completed. Verify failures: $($VerifyFaile
 # INFO:
 #   When files are deleted in Windows, the file system marks the space as
 #   available but does not immediately overwrite the data. The deleted file's
-#   content remains on disk until that space is used by a new file. cipher /w:C
+#   content remains on disk until that space is used by a new file. cipher /w:C:\
 #   attempts to overwrite unallocated space with repeated patterns. However, the
 #   effectiveness of this approach depends heavily on the storage medium.
 #
@@ -1848,7 +2017,7 @@ Write-Progress-Log "=== Hardening run completed. Verify failures: $($VerifyFaile
 #   (e.g. before disposal), use vendor-provided secure erase or cryptographic erase.
 # =============================================================================
 Write-Host "`n--- FINAL STEP: FREE SPACE WIPE (OPTIONAL) ---" -ForegroundColor Cyan
-Write-Host "cipher /w:C overwrites unallocated space on C:. Effectiveness varies by storage type:" -ForegroundColor Yellow
+Write-Host "cipher /w:C:\ overwrites unallocated space on C:. Effectiveness varies by storage type:" -ForegroundColor Yellow
 Write-Host "  HDD: Appropriate for magnetic disks when verified (NIST SP 800-88 R2)" -ForegroundColor Gray
 Write-Host "  SSD: Limited effectiveness due to wear-leveling and TRIM" -ForegroundColor Gray
 Write-Host "  For device disposal: Use manufacturer-supported secure erase or crypto erase" -ForegroundColor Gray
@@ -1871,11 +2040,11 @@ try {
 if ($CipherDiskIsSSD) {
     # SSD: cipher /w is not reliable and adds avoidable write wear. Default to skip.
     Write-Host "`nDisk type detected: SSD." -ForegroundColor Gray
-    Write-Host "RECOMMENDATION: Do NOT run cipher /w:C on this SSD." -ForegroundColor Green
+    Write-Host "RECOMMENDATION: Do NOT run cipher /w:C:\ on this SSD." -ForegroundColor Green
     Write-Host "  Wear-leveling and TRIM make the overwrite unreliable, and it adds needless write wear." -ForegroundColor Gray
     Write-Host "  Rely on BitLocker full-disk encryption for data-at-rest protection. For disposal, use the" -ForegroundColor Gray
     Write-Host "  drive manufacturer's secure-erase / cryptographic-erase tool instead." -ForegroundColor Gray
-    $CipherChoice = Read-Host "Override and run cipher /w:C anyway? (y/N)"
+    $CipherChoice = Read-Host "Override and run cipher /w:C:\ anyway? (y/N)"
     $RunCipher = ($CipherChoice -eq "Y" -or $CipherChoice -eq "y")
     if (-not $RunCipher) {
         Write-Host "`nFree space wipe skipped (recommended for SSD)." -ForegroundColor Green
@@ -1884,23 +2053,23 @@ if ($CipherDiskIsSSD) {
 } else {
     if ($CipherDiskKnown) {
         Write-Host "`nDisk type detected: HDD." -ForegroundColor Gray
-        Write-Host "On a magnetic disk, cipher /w:C is an appropriate way to clear deleted-file remnants." -ForegroundColor Gray
+        Write-Host "On a magnetic disk, cipher /w:C:\ is an appropriate way to clear deleted-file remnants." -ForegroundColor Gray
     } else {
         Write-Host "`nDisk type could not be determined via WMI." -ForegroundColor Yellow
         Write-Host "If C: is an SSD, skip this (use BitLocker / vendor secure-erase instead)." -ForegroundColor Gray
     }
     Write-Host "This can take 10-60 minutes. Do not close this window while it runs." -ForegroundColor Yellow
-    $CipherChoice = Read-Host "Run cipher /w:C now? (Y/N)"
+    $CipherChoice = Read-Host "Run cipher /w:C:\ now? (Y/N)"
     $RunCipher = ($CipherChoice -eq "Y" -or $CipherChoice -eq "y")
     if (-not $RunCipher) {
-        Write-Host "`nFree space wipe skipped. Run 'cipher /w:C' manually when ready." -ForegroundColor Yellow
+        Write-Host "`nFree space wipe skipped. Run 'cipher /w:C:\' manually when ready." -ForegroundColor Yellow
         Write-Progress-Log "Cipher free space wipe skipped by operator."
     }
 }
 
 if ($RunCipher) {
-    Write-Host "`nRunning cipher /w:C - do not close this window..." -ForegroundColor Cyan
-    cipher /w:C
+    Write-Host "`nRunning cipher /w:C:\ - do not close this window..." -ForegroundColor Cyan
+    cipher /w:C:\
     Write-Host "`nFree space wipe complete." -ForegroundColor Green
     Write-Progress-Log "Cipher free space wipe completed (disk SSD=$CipherDiskIsSSD, known=$CipherDiskKnown)."
 }
